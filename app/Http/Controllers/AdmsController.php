@@ -1,0 +1,337 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Attendance;
+use App\Models\Employee;
+use App\Models\EmployeePunchLog;
+use Carbon\Carbon;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
+
+class AdmsController extends Controller
+{
+    const HEARTBEAT_INTERVAL = 10;
+
+    public function handle(Request $request)
+    {
+        $sn    = $request->query('SN', 'unknown');
+        $table = $request->query('table');
+        $body  = $request->getContent();
+
+        Log::info('ZKTeco IN', [
+            'method' => $request->method(),
+            'SN'     => $sn,
+            'table'  => $table,
+            'query'  => $request->query(),
+            'body'   => $body,
+        ]);
+
+        if ($request->isMethod('GET')) {
+            return $this->handleRegistration($sn);
+        }
+
+        return $this->handlePush($sn, $table, $body, $request);
+    }
+
+    private function handleRegistration(string $sn)
+    {
+        Cache::put("zkteco_last_seen_{$sn}", now()->toDateTimeString(), now()->addDay());
+
+        $key      = "zkteco_commands_{$sn}";
+        $commands = Cache::get($key, []);  // read only, don't delete yet
+
+        Log::info('ZKTeco heartbeat', [
+            'sn'               => $sn,
+            'pending_commands' => count($commands),
+            'commands'         => array_values($commands),
+        ]);
+
+        $body  = "GET OPTION FROM: {$sn}\r\n";
+        $body .= "ATTLOGStamp=9999\r\n";
+        $body .= "OPERLOGStamp=9999\r\n";
+        $body .= "ATTPHOTOStamp=9999\r\n";
+        $body .= "ErrorDelay=30\r\n";
+        $body .= "Delay=" . self::HEARTBEAT_INTERVAL . "\r\n";
+        $body .= "TransTimes=00:00;14:05\r\n";
+        $body .= "TransInterval=1\r\n";
+        $body .= "TransFlag=1111000000\r\n";
+        $body .= "TimeZone=5.5\r\n";
+        $body .= "Realtime=1\r\n";
+        $body .= "Encrypt=None\r\n";
+        $body .= "ServerVer=2.4.1\r\n";
+        $body .= "PushProtVer=2.4.1\r\n";
+        $body .= "CommKey=0\r\n";
+
+        foreach ($commands as $cmd) {
+            $body .= $cmd . "\r\n";
+        }
+
+        Log::info('ZKTeco OUT', ['body' => $body]);
+
+        return response($body, 200)
+            ->header('Content-Type', 'text/plain')
+            ->header('Content-Length', strlen($body));
+    }
+
+    private function handlePush(string $sn, ?string $table, string $body, Request $request)
+    {
+        Log::info('ZKTeco device push', [
+            'sn'    => $sn,
+            'table' => $table,
+            'query' => $request->query(),
+            'body'  => $body,
+        ]);
+
+        if ($table === 'ATTLOG') {
+            $this->processAttendanceLogs($body);
+        }
+
+        // Handle command ACK — device sends: ID=cmdID&Return=0 (success) or Return=-1 (fail)
+        if (preg_match('/ID=(\d+).*Return=(-?\d+)/s', $body, $match)) {
+            $cmdId  = $match[1];
+            $result = (int) $match[2];
+
+            Log::info('ZKTeco command ACK', [
+                'sn'     => $sn,
+                'cmd_id' => $cmdId,
+                'result' => $result === 0 ? 'SUCCESS' : 'FAILED',
+                'raw'    => $result,
+            ]);
+
+            if ($result === 0) {
+                $key      = "zkteco_commands_{$sn}";
+                $commands = Cache::get($key, []);
+                unset($commands[$cmdId]);
+                Cache::put($key, $commands, now()->addHours(24));
+            }
+
+            return response("OK", 200)
+                ->header('Content-Type', 'text/plain')
+                ->header('Content-Length', 2);
+        }
+
+        return response("OK", 200)
+            ->header('Content-Type', 'text/plain')
+            ->header('Content-Length', 2);
+    }
+
+    private function processAttendanceLogs(string $body)
+    {
+        foreach (explode("\n", trim($body)) as $line) {
+            $line = trim($line);
+            if (empty($line)) continue;
+
+            $parts = explode("\t", $line);
+            if (count($parts) < 3) continue;
+
+            $userId  = trim($parts[0]);
+            $attTime = trim($parts[1]);
+            $status  = (int) trim($parts[2]);
+
+            try {
+                $carbonTime = Carbon::parse($attTime);
+                $date = $carbonTime->format('Y-m-d');
+                $time = $carbonTime->format('H:i:s');
+
+                $lastAttendance = Attendance::where('user_id', $userId)
+                    ->where('date', $date)
+                    ->latest()
+                    ->first();
+
+                if ($status === 0 && (!$lastAttendance || $lastAttendance->check_out)) {
+                    Attendance::create([
+                        'user_id'  => $userId,
+                        'date'     => $date,
+                        'check_in' => $time,
+                        'status'   => 'Present',
+                    ]);
+                } elseif ($status === 1 && $lastAttendance && !$lastAttendance->check_out) {
+                    $checkIn  = Carbon::parse($lastAttendance->check_in);
+                    $checkOut = Carbon::parse($time);
+                    $lastAttendance->check_out  = $time;
+                    $lastAttendance->work_hours = $checkIn->diffInHours($checkOut)
+                        + round($checkIn->diffInMinutes($checkOut) % 60 / 60, 2);
+                    $lastAttendance->save();
+                }
+
+                Log::info('ZKTeco attendance saved', ['user' => $userId, 'time' => $attTime, 'status' => $status]);
+
+                // Punch log — every swipe for employees only
+                if (Employee::where('id', $userId)->exists()) {
+                    EmployeePunchLog::create([
+                        'employee_id' => $userId,
+                        'punch_date'  => $date,
+                        'punch_time'  => $time,
+                        'punch_type'  => $status === 1 ? 'out' : 'in',
+                        'source'      => 'device',
+                        'device_sn'   => null,
+                    ]);
+                }
+            } catch (\Exception $e) {
+                Log::error('ZKTeco attendance error', ['error' => $e->getMessage(), 'line' => $line]);
+            }
+        }
+    }
+
+    // ─── APIs ────────────────────────────────────────────────────────────────
+
+    public function deviceStatus(Request $request)
+    {
+        $sn       = $request->query('sn');
+        $lastSeen = Cache::get("zkteco_last_seen_{$sn}");
+        $online   = $lastSeen && Carbon::parse($lastSeen)->diffInSeconds(now()) < 60;
+
+        return response()->json([
+            'sn'        => $sn,
+            'online'    => $online,
+            'last_seen' => $lastSeen ?? 'Never',
+            'message'   => $online ? 'Device is online' : 'Device offline or not connected',
+        ]);
+    }
+
+    public function addUser(Request $request)
+    {
+        $sn       = $request->input('sn');
+        $uid      = $request->input('user_id');
+        $safeName = str_replace(' ', '_', $request->input('name'));
+        $card     = $request->input('card', '0');
+        $id       = time();
+
+        $params = [
+            "PIN={$uid}",
+            "Name={$safeName}",
+            "Card={$card}",
+            "Pri=0",
+        ];
+        if (!empty($request->input('password'))) {
+            $params[] = "Pass={$request->input('password')}";
+        }
+
+        $command = "C:{$id}:DATA UPDATE USERINFO\t" . implode("\t", $params);
+
+        self::queueCommand($sn, $id, $command);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Add user queued. Device will sync within ' . self::HEARTBEAT_INTERVAL . ' seconds.',
+        ]);
+    }
+
+    public function deleteUser(Request $request)
+    {
+        $sn  = $request->input('sn');
+        $uid = $request->input('user_id');
+        $id  = time();
+
+        self::queueCommand($sn, $id, "C:{$id}:DATA DELETE USERINFO\tPIN={$uid}");
+
+        return response()->json(['success' => true, 'message' => 'Delete user queued.']);
+    }
+
+    public function clearAttendance(Request $request)
+    {
+        $sn = $request->input('sn');
+        $id = time();
+
+        self::queueCommand($sn, $id, "C:{$id}:DATA CLEAR ATTLOG");
+
+        return response()->json(['success' => true, 'message' => 'Clear attendance queued.']);
+    }
+
+    public function rebootDevice(Request $request)
+    {
+        $sn = $request->input('sn');
+        $id = time();
+
+        self::queueCommand($sn, $id, "C:{$id}:REBOOT");
+
+        return response()->json(['success' => true, 'message' => 'Reboot queued.']);
+    }
+
+    public static function queueCommand(string $sn, int $id, string $command): void
+    {
+        $key           = "zkteco_commands_{$sn}";
+        $commands      = Cache::get($key, []);
+        $commands[$id] = $command;  // keyed by ID for ACK-based removal
+        Cache::put($key, $commands, now()->addHours(24));
+
+        Log::info('ZKTeco command queued', [
+            'sn'             => $sn,
+            'id'             => $id,
+            'command'        => $command,
+            'total_in_queue' => count($commands),
+        ]);
+    }
+
+    // ─── Bridge endpoints (local PC polls these) ─────────────────────────────
+
+    public function bridgePending(Request $request)
+    {
+        if ($request->query('secret') !== config('zkteco.bridge_secret', 'bridge_secret_key')) {
+            return response()->json(['error' => 'Unauthorized'], 401);
+        }
+
+        $sn  = $request->query('sn', config('zkteco.sn', 'HKQ8241900193'));
+        $key = "zkteco_commands_{$sn}";
+
+        $commands = Cache::get($key, []);
+
+        // Remove commands from queue immediately so the bridge doesn't repeat them
+        if (!empty($commands)) {
+            Cache::forget($key);
+            Log::info('ZKTeco bridge: commands dispatched to bridge app', [
+                'sn'    => $sn,
+                'count' => count($commands),
+            ]);
+        }
+
+        $parsed = [];
+        foreach ($commands as $id => $cmd) {
+            $parsed[] = $this->parseCommandString((int) $id, $cmd);
+        }
+
+        return response()->json(['sn' => $sn, 'commands' => $parsed]);
+    }
+
+    public function bridgeAck(Request $request)
+    {
+        if ($request->input('secret') !== config('zkteco.bridge_secret', 'bridge_secret_key')) {
+            return response()->json(['error' => 'Unauthorized'], 401);
+        }
+
+        $sn    = $request->input('sn', config('zkteco.sn', 'HKQ8241900193'));
+        $cmdId = $request->input('cmd_id');
+        $ok    = (bool) $request->input('success', false);
+
+        Log::info('ZKTeco bridge ACK', ['sn' => $sn, 'cmd_id' => $cmdId, 'success' => $ok]);
+
+        if ($ok) {
+            $key      = "zkteco_commands_{$sn}";
+            $commands = Cache::get($key, []);
+            unset($commands[$cmdId]);
+            Cache::put($key, $commands, now()->addHours(24));
+        }
+
+        return response()->json(['ok' => true]);
+    }
+
+    private function parseCommandString(int $id, string $cmd): array
+    {
+        // Format: C:ID:COMMAND_TYPE\tPARAM=val\t...
+        if (preg_match('/^C:\d+:(.+)/', $cmd, $m)) {
+            $parts   = explode("\t", $m[1]);
+            $type    = array_shift($parts);
+            $params  = [];
+            foreach ($parts as $part) {
+                if (strpos($part, '=') !== false) {
+                    [$k, $v]    = explode('=', $part, 2);
+                    $params[$k] = $v;
+                }
+            }
+            return ['id' => $id, 'type' => $type, 'params' => $params];
+        }
+        return ['id' => $id, 'type' => 'UNKNOWN', 'params' => []];
+    }
+}
