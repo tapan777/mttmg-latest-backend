@@ -215,6 +215,19 @@ class PaymentController extends Controller
                 $yearlyWarning = "Your yearly membership expires on {$yearlyExpiryFormatted}, before this package period ends. Please renew yearly membership in time.";
             }
 
+            // Block the package change if the yearly membership is expiring the same month this
+            // package starts, unless the yearly membership is also being renewed in this request.
+            $isRenewingYearly = $request->has('admission_value_id') && $request->admission_value_id != null;
+            if (!$isRenewingYearly && $yearlyPackage
+                && Carbon::parse($yearlyPackage->end_date)->format('Y-m') === Carbon::parse($previous_packageData->start_date)->format('Y-m')
+            ) {
+                $yearlyExpiryFormatted = Carbon::parse($yearlyPackage->end_date)->format('d-m-Y');
+                return response()->json([
+                    'message' => "Yearly membership expires on {$yearlyExpiryFormatted}, in the same month as this package. Please renew the yearly membership first.",
+                    'code' => 400
+                ], 200);
+            }
+
             $payment_data = [
                 'member_id' => $request->member_id,
                 'package_id' => $request->package_id,
@@ -340,6 +353,19 @@ class PaymentController extends Controller
             } elseif (Carbon::parse($yearlyPackage->end_date)->lt(Carbon::parse($end_date))) {
                 $yearlyExpiryFormatted = Carbon::parse($yearlyPackage->end_date)->format('d-m-Y');
                 $yearlyWarning = "Your yearly membership expires on {$yearlyExpiryFormatted}, before this package period ends. Please renew yearly membership in time.";
+            }
+
+            // Block the renewal if the yearly membership is expiring the same month this
+            // package starts, unless the yearly membership is also being renewed in this request.
+            $isRenewingYearly = $request->has('admission_value_id') && $request->admission_value_id != null;
+            if (!$isRenewingYearly && $yearlyPackage
+                && Carbon::parse($yearlyPackage->end_date)->format('Y-m') === Carbon::parse($start_date)->format('Y-m')
+            ) {
+                $yearlyExpiryFormatted = Carbon::parse($yearlyPackage->end_date)->format('d-m-Y');
+                return response()->json([
+                    'message' => "Yearly membership expires on {$yearlyExpiryFormatted}, in the same month as this package. Please renew the yearly membership first.",
+                    'code' => 400
+                ], 200);
             }
 
             if ($request->has('due')) {

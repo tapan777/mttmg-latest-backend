@@ -251,7 +251,7 @@ class AllPaymentController extends Controller
                 ->where('payment_type', 0)
                 ->limit($limit)
                 ->offset($offset)
-                ->orderBy('id', 'desc');
+                ->orderBy('end_date', 'desc');
 
             // Date filter conditions
             if ($dateFilter && isset($dateFilter['type']) && isset($dateFilter['value'])) {
@@ -449,7 +449,7 @@ class AllPaymentController extends Controller
                 ->where('due', '>', 0)
                 ->limit($limit)
                 ->offset($offset)
-                ->orderBy('id', 'desc');
+                ->orderBy('end_date', 'desc');
             if ($dateFilter && isset($dateFilter['type']) && isset($dateFilter['value'])) {
                 if ($dateFilter['type'] == 1 && $dateFilter['value'] != "") {
                     $check_days = $dateFilter['value'];
@@ -622,11 +622,11 @@ class AllPaymentController extends Controller
                 ->where('package_status', 1)
                 ->limit($limit)
                 ->offset($offset)
-                ->orderBy('id', 'desc');
+                ->orderBy('end_date', 'desc');
                 $total_count_query = Payment::with(['members', 'packages'])
                 ->where('end_date', '<=', $today)
                 ->where('package_status', 1)
-                ->orderBy('id', 'desc');
+                ->orderBy('end_date', 'desc');
                 $total_count = $total_count_query->count();
 
             if ($dateFilter && isset($dateFilter['type']) && isset($dateFilter['value'])) {
@@ -905,7 +905,7 @@ class AllPaymentController extends Controller
             ->where('payment_type', 0)
             ->limit($limit)
             ->offset($offset)
-            ->orderBy('id', 'desc');
+            ->orderBy('end_date', 'desc');
         if ($dateFilter && isset($dateFilter['type']) && isset($dateFilter['value'])) {
             if ($dateFilter['type'] == 1 && $dateFilter['value'] != [] && $dateFilter['value'] != "") {
                 $check_days = $dateFilter['value'];
@@ -1148,7 +1148,7 @@ class AllPaymentController extends Controller
 
         $query = TrainerPayment::with(['members', 'trainer_packages'])
             ->where('due', '>', 0)
-            ->orderBy('id', 'desc');
+            ->orderBy('end_date', 'desc');
 
         $trainer_payments = $query->orWhere('due', 'like', "%$search_text%")
             ->orWhereHas('members', function ($query) use ($search_text) {
@@ -1203,7 +1203,7 @@ class AllPaymentController extends Controller
         $today = Carbon::now('Asia/Kolkata')->format('Y-m-d');
         $query = TrainerPayment::with(['members', 'trainer_packages'])
             ->where('end_date', '<', $today)
-            ->orderBy('id', 'desc');
+            ->orderBy('end_date', 'desc');
 
         if ($search_text) {
             $query->whereHas('members', function ($query) use ($search_text) {

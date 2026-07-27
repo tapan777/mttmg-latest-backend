@@ -171,7 +171,7 @@ class MemberController extends Controller
                     event(new SendWhatsAppNotification(
                         'payment_received_confirmation',
                         [$member->name, $request->paying_amount, $package_name],
-                        [$member->phone, '9937542268']
+                        [$member->phone] // owner number '9937542268' removed — testing done, WhatsApp confirmed working
                     ));
 
                     event(new SendWhatsAppNotification(
@@ -182,7 +182,7 @@ class MemberController extends Controller
                             $member->name,                                                   // {{3}} Received From
                             Carbon::parse($start_date)->addDays($package->duration ?? 30)->format('d-m-Y'), // {{4}} Next Due Date
                         ],
-                        [$member->phone, '9937542268']
+                        [$member->phone] // owner number '9937542268' removed — testing done, WhatsApp confirmed working
                     ));
 
                     // Welcome email — disabled

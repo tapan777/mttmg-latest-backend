@@ -85,7 +85,7 @@ class BalanceSheetController extends Controller
                         ->orWhere('invoices.id', 'like', "%$searchText%");
                 });
     
-            $applyDateFilter($mainPaymentsQuery, 'payments', 'date_of_payment');
+            $applyDateFilter($mainPaymentsQuery, 'payments', 'created_at');
     
             $trainerPaymentsQuery = DB::table('trainer_payments')
                 ->select(
@@ -106,7 +106,7 @@ class BalanceSheetController extends Controller
                         ->orWhere('invoices.id', 'like', "%$searchText%");
                 });
     
-            $applyDateFilter($trainerPaymentsQuery, 'trainer_payments', 'date_of_payment');
+            $applyDateFilter($trainerPaymentsQuery, 'trainer_payments', 'created_at');
     
             $yearlyPackagesQuery = DB::table('yearly_packages')
                 ->select(
@@ -127,17 +127,7 @@ class BalanceSheetController extends Controller
                         ->orWhere('invoices.id', 'like', "%$searchText%");
                 });
     
-            // Filter by payment_date (fallback to created_at for older records without payment_date)
-            $applyDateFilterYearly = function ($query) use ($date_filter_from, $date_filter_to) {
-                if ($date_filter_from && $date_filter_to) {
-                    $query->whereRaw('(COALESCE(yearly_packages.payment_date, yearly_packages.created_at) BETWEEN ? AND ?)', [$date_filter_from, $date_filter_to . ' 23:59:59']);
-                } elseif ($date_filter_from) {
-                    $query->whereRaw('DATE(COALESCE(yearly_packages.payment_date, yearly_packages.created_at)) >= ?', [$date_filter_from]);
-                } elseif ($date_filter_to) {
-                    $query->whereRaw('DATE(COALESCE(yearly_packages.payment_date, yearly_packages.created_at)) <= ?', [$date_filter_to]);
-                }
-            };
-            $applyDateFilterYearly($yearlyPackagesQuery);
+            $applyDateFilter($yearlyPackagesQuery, 'yearly_packages', 'created_at');
     
             $nonRegMembersQuery = DB::table('non_registre_members')
                 ->select(
@@ -156,7 +146,7 @@ class BalanceSheetController extends Controller
                         ->orWhere('non_registre_members.email', 'like', "%$searchText%");
                 });
     
-            $applyDateFilter($nonRegMembersQuery, 'non_registre_members', 'payment_date');
+            $applyDateFilter($nonRegMembersQuery, 'non_registre_members', 'created_at');
 
             $steamBathInvoicesQuery = DB::table('invoices')
                 ->select(
@@ -177,22 +167,7 @@ class BalanceSheetController extends Controller
                         ->orWhere('invoices.id', 'like', "%$searchText%");
                 });
 
-            if ($date_filter_from && $date_filter_to) {
-                $steamBathInvoicesQuery->whereRaw(
-                    'COALESCE(invoices.steam_bath_payment_date, DATE(invoices.created_at)) BETWEEN ? AND ?',
-                    [$date_filter_from, $date_filter_to . ' 23:59:59']
-                );
-            } elseif ($date_filter_from) {
-                $steamBathInvoicesQuery->whereRaw(
-                    'DATE(COALESCE(invoices.steam_bath_payment_date, invoices.created_at)) >= ?',
-                    [$date_filter_from]
-                );
-            } elseif ($date_filter_to) {
-                $steamBathInvoicesQuery->whereRaw(
-                    'DATE(COALESCE(invoices.steam_bath_payment_date, invoices.created_at)) <= ?',
-                    [$date_filter_to]
-                );
-            }
+            $applyDateFilter($steamBathInvoicesQuery, 'invoices', 'created_at');
     
             $combinedQuery = $mainPaymentsQuery
                 ->union($trainerPaymentsQuery)

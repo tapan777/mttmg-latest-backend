@@ -300,7 +300,7 @@ class AdminLoginController extends Controller
     {
         $input = $request->all();
         $validation = Validator::make($input, [
-            'email' => 'required | email',
+            'email' => 'required',
             'password' => 'required'
         ]);
 
@@ -313,6 +313,7 @@ class AdminLoginController extends Controller
             $admin = User::with('pageAccesses')
                 ->where('email', $input['email'])
                 ->orWhere('user_name', $request->email)
+                ->orWhere('phone', $request->email)
                 ->first();
 
             if (!$admin) {

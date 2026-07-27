@@ -14,6 +14,7 @@ class Kernel extends ConsoleKernel
     {
         $schedule->command('app:send-package-expiry-notifications')->everyMinute();
         $schedule->command('app:sync-device-membership')->everyMinute();
+        $schedule->command('app:sync-device-yearly-membership')->everyMinute();
         $schedule->command('app:auto-checkout-employees')->everyMinute();
         $schedule->command('app:deactivate-expired-members')->everyMinute();
         $schedule->command('app:activate-members-with-active-package')->everyMinute();
