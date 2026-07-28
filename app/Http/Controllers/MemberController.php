@@ -201,29 +201,34 @@ class MemberController extends Controller
 
                 // print_r($invoiceId);
                 if ($payment && $member && $result) {
-                    $sn       = config('zkteco.sn', 'HKQ8241900193');
-                    $uid      = $member->id;
-                    $safeName = str_replace(' ', '_', $member->name);
-                    $card     = $request->card_number ?? '0';
-                    $cmdId    = time();
+                    // Skip the device push for backdated entries — if the computed package
+                    // end_date is already in the past, this member is expired on arrival and
+                    // should never be added to the biometric device.
+                    if (Carbon::parse($end_date)->gte(Carbon::today())) {
+                        $sn       = config('zkteco.sn', 'HKQ8241900193');
+                        $uid      = $member->id;
+                        $safeName = str_replace(' ', '_', $member->name);
+                        $card     = $request->card_number ?? '0';
+                        $cmdId    = time();
 
-                    $params = [
-                        "PIN={$uid}",
-                        "Name={$safeName}",
-                        "Card={$card}",
-                        "Pri=0",
-                    ];
-                    if (!empty($request->password)) {
-                        $params[] = "Pass={$request->password}";
+                        $params = [
+                            "PIN={$uid}",
+                            "Name={$safeName}",
+                            "Card={$card}",
+                            "Pri=0",
+                        ];
+                        if (!empty($request->password)) {
+                            $params[] = "Pass={$request->password}";
+                        }
+
+                        AdmsController::queueCommand(
+                            $sn,
+                            $cmdId,
+                            "C:{$cmdId}:DATA UPDATE USERINFO\t" . implode("\t", $params)
+                        );
+
+                        $member->update(['on_device' => 1]);
                     }
-
-                    AdmsController::queueCommand(
-                        $sn,
-                        $cmdId,
-                        "C:{$cmdId}:DATA UPDATE USERINFO\t" . implode("\t", $params)
-                    );
-
-                    $member->update(['on_device' => 1]);
 
                     return response()->json([
                         'message' => "Member Added Successfully. Biometric device will sync within 10 seconds.",
@@ -631,16 +636,25 @@ class MemberController extends Controller
 
             if ($result) {
                 if ($request->has('card_number') && (string) $request->card_number !== (string) $oldCard) {
-                    $sn       = config('zkteco.sn', 'HKQ8241900193');
-                    $uid      = $member->id;
-                    $safeName = str_replace(' ', '_', $member->fresh()->name);
-                    $card     = $member->fresh()->card_number ?? '0';
-                    $cmdId    = time();
-                    AdmsController::queueCommand(
-                        $sn,
-                        $cmdId,
-                        "C:{$cmdId}:DATA UPDATE USERINFO\tPIN={$uid}\tName={$safeName}\tCard={$card}\tPri=0"
-                    );
+                    $today = Carbon::today()->toDateString();
+                    $hasActivePackage = Payment::where('member_id', $member->id)
+                        ->where('payment_type', 0)
+                        ->orderByDesc('created_at')
+                        ->value('end_date') >= $today;
+
+                    if ($hasActivePackage) {
+                        $sn       = config('zkteco.sn', 'HKQ8241900193');
+                        $uid      = $member->id;
+                        $safeName = str_replace(' ', '_', $member->fresh()->name);
+                        $card     = $member->fresh()->card_number ?? '0';
+                        $cmdId    = time();
+                        AdmsController::queueCommand(
+                            $sn,
+                            $cmdId,
+                            "C:{$cmdId}:DATA UPDATE USERINFO\tPIN={$uid}\tName={$safeName}\tCard={$card}\tPri=0"
+                        );
+                        $member->update(['on_device' => 1]);
+                    }
                 }
                 return response()->json([
                     'message' => 'Updated Successfully',
@@ -742,13 +756,15 @@ class MemberController extends Controller
         try {
             $model = Member::find($request->id);
             if ($model != null) {
-                // Fingerprint machine code commented out
-                // $zk = new ZKTeco('192.168.1.201');
-                // $zk->connect();
-                // $zk->removeUser($request->id);
-                // $zk->testVoice();
-
                 $memberId = $model->id;
+
+                $sn    = config('zkteco.sn', 'HKQ8241900193');
+                $cmdId = time();
+                AdmsController::queueCommand(
+                    $sn,
+                    $cmdId,
+                    "C:{$cmdId}:DATA DELETE USERINFO\tPIN={$memberId}"
+                );
 
                 // Delete all member-related and payment data
                 Payment::where('member_id', $memberId)->delete();

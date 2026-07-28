@@ -21,7 +21,9 @@ class NonRegistreMember extends Model
         'due',
         'start_date',
         'end_date',
-        'payment_date'
+        'payment_date',
+        'card_number',
+        'on_device'
     ];
 
     public function offerPackages(){

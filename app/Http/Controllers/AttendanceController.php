@@ -95,7 +95,9 @@ class AttendanceController extends Controller
             if ($date_filter_from && $date_filter_to) {
                 $query->whereBetween('date', [$date_filter_from, $date_filter_to]);
             }
-    
+
+            $total_count = $query->count();
+
             // Fetch Data
             $attendance_data = $query->orderBy('id', 'desc')
                 ->offset($index)
@@ -123,8 +125,9 @@ class AttendanceController extends Controller
     
             return response()->json([
                 'data' => $attendance_data->isNotEmpty() ? $attendance_data : ['message' => 'No Record Found'],
+                'total_count' => $total_count,
                 'code' => 200,
-                
+
             ]);
         } catch (\Exception $e) {
             return response()->json([

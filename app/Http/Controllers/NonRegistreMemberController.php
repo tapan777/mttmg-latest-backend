@@ -14,6 +14,10 @@ use Illuminate\Support\Facades\Validator;
 
 class NonRegistreMemberController extends Controller
 {
+    // Non-registered (walk-in) members use PINs starting at 100000 on the biometric
+    // device so they never collide with real Member IDs, which are small sequential integers.
+    const DEVICE_PIN_OFFSET = 100000;
+
     public function create_nonRegistered_member(Request $request)
     {
         try {
@@ -44,6 +48,19 @@ class NonRegistreMemberController extends Controller
                 $payload['offer'] = $request->offer;
                 $data = NonRegistreMember::create($payload);
                 if ($data) {
+                    if ($request->has('card_number') && $request->card_number && Carbon::parse($end_date)->gte(Carbon::today())) {
+                        $sn       = config('zkteco.sn', 'HKQ8241900193');
+                        $pin      = self::DEVICE_PIN_OFFSET + $data->id;
+                        $safeName = str_replace(' ', '_', $data->name);
+                        $card     = $request->card_number;
+                        $cmdId    = time();
+                        AdmsController::queueCommand(
+                            $sn,
+                            $cmdId,
+                            "C:{$cmdId}:DATA UPDATE USERINFO\tPIN={$pin}\tName={$safeName}\tCard={$card}\tPri=0"
+                        );
+                        $data->update(['on_device' => 1]);
+                    }
                     return response()->json([
                         'message' => "Member Created Successfully",
                         'code' => 200
@@ -244,6 +261,17 @@ class NonRegistreMemberController extends Controller
                 'message' => 'Invalid Id',
                 'code' => 500
             ], 200);
+        }
+
+        if ($mbr_data->on_device) {
+            $sn    = config('zkteco.sn', 'HKQ8241900193');
+            $pin   = self::DEVICE_PIN_OFFSET + $mbr_data->id;
+            $cmdId = time();
+            AdmsController::queueCommand(
+                $sn,
+                $cmdId,
+                "C:{$cmdId}:DATA DELETE USERINFO\tPIN={$pin}"
+            );
         }
 
         // Delete the employee record

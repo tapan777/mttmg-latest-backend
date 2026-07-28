@@ -22,7 +22,14 @@ class SyncDeviceMembership extends Command
         $cmdId = time();
 
         // Members currently on device whose latest main-package expired more than 5 days ago
-        $expiredMembers = Member::where('on_device', 1)
+        // (matched by card_number rather than on_device alone, since on_device can drift out of
+        // sync with the real device state — e.g. a card added via member edit)
+        $expiredMembers = Member::where(function ($q) {
+                $q->where('on_device', 1)
+                    ->orWhere(function ($q2) {
+                        $q2->whereNotNull('card_number')->where('card_number', '!=', '');
+                    });
+            })
             ->whereRaw('(
                 SELECT end_date FROM payments
                 WHERE payments.member_id = members.id
