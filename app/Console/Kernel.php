@@ -12,9 +12,9 @@ class Kernel extends ConsoleKernel
      */
     protected function schedule(Schedule $schedule): void
     {
-        $schedule->command('app:send-package-expiry-notifications')->everyMinute();
-        $schedule->command('app:sync-device-membership')->everyMinute();
-        $schedule->command('app:sync-device-yearly-membership')->everyMinute();
+        $schedule->command('app:send-package-expiry-notifications')->dailyAt('08:30');
+        $schedule->command('app:sync-device-membership')->dailyAt('00:30');
+        $schedule->command('app:sync-device-yearly-membership')->dailyAt('00:35');
         $schedule->command('app:cleanup-expired-non-registre-members')->everyMinute();
         $schedule->command('app:auto-checkout-employees')->everyMinute();
         $schedule->command('app:deactivate-expired-members')->everyMinute();

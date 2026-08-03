@@ -25,7 +25,8 @@ class User extends Authenticatable
         'role',
         'phone',
         'status',
-        'email_verified_at'
+        'email_verified_at',
+        'balance_sheet_password'
     ];
 
     /**
@@ -36,6 +37,7 @@ class User extends Authenticatable
     protected $hidden = [
         'password',
         'remember_token',
+        'balance_sheet_password',
     ];
 
     /**
@@ -46,6 +48,7 @@ class User extends Authenticatable
     protected $casts = [
         'email_verified_at' => 'datetime',
         'password' => 'hashed',
+        'balance_sheet_password' => 'hashed',
     ];
 
     protected $attributes = [

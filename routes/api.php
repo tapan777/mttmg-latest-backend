@@ -58,7 +58,8 @@ Route::middleware('auth.token', 'operation.log', 'throttle:60,1')->group(functio
 
     Route::post('salary/generate', [SalaryController::class, 'generateSalary']);
     //User Api
-    Route::post("update-user", [AdminLoginController::class, 'userUpdate']); //Update User   
+    Route::post("update-user", [AdminLoginController::class, 'userUpdate']); //Update User
+    Route::post("verify-balance-password", [AdminLoginController::class, 'verifyBalancePassword']); //Verify Balance Sheet Page Password
     Route::post("retrive-user", [AdminLoginController::class, 'retriveUser']); //Retrive User 
     Route::post("delete-user", [AdminLoginController::class, 'deleteUser']); //Delete User  
     Route::post("auto-complete-user", [AdminLoginController::class, 'userAutoComplete']); //Auto Complete User
@@ -288,6 +289,9 @@ Route::middleware('auth.token', 'operation.log', 'throttle:60,1')->group(functio
     Route::post('operation-logs', [OperationLogController::class, 'index']);
     Route::post('operation-logs/users', [OperationLogController::class, 'usersWithLogs']);
     Route::post('operation-logs/delete-old', [OperationLogController::class, 'deleteOldLogs']);
+
+    // Biometric device command logs (add/update/delete user pushed to device)
+    Route::post('device-command-logs', [AdmsController::class, 'commandLogs']);
 
     //Biomatric
 

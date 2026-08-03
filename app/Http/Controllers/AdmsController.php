@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Attendance;
+use App\Models\DeviceCommandLog;
 use App\Models\Employee;
 use App\Models\EmployeePunchLog;
 use Carbon\Carbon;
@@ -106,6 +107,12 @@ class AdmsController extends Controller
                 unset($commands[$cmdId]);
                 Cache::put($key, $commands, now()->addHours(24));
             }
+
+            DeviceCommandLog::where('sn', $sn)->where('cmd_id', $cmdId)->update([
+                'status'        => $result === 0 ? 'success' : 'failed',
+                'error_message' => $result === 0 ? null : "Device returned code {$result}",
+                'acked_at'      => now(),
+            ]);
 
             return response("OK", 200)
                 ->header('Content-Type', 'text/plain')
@@ -263,6 +270,42 @@ class AdmsController extends Controller
             'command'        => $command,
             'total_in_queue' => count($commands),
         ]);
+
+        [$action, $pin, $card] = self::parseCommandForLog($command);
+        DeviceCommandLog::create([
+            'sn'          => $sn,
+            'cmd_id'      => $id,
+            'action'      => $action,
+            'pin'         => $pin,
+            'card_number' => $card,
+            'command'     => $command,
+            'status'      => 'queued',
+        ]);
+    }
+
+    private static function parseCommandForLog(string $command): array
+    {
+        $action = 'unknown';
+        if (str_contains($command, 'DATA UPDATE USERINFO')) {
+            $action = 'add_or_update_user';
+        } elseif (str_contains($command, 'DATA DELETE USERINFO')) {
+            $action = 'delete_user';
+        } elseif (str_contains($command, 'DATA CLEAR ATTLOG')) {
+            $action = 'clear_attendance';
+        } elseif (str_contains($command, 'REBOOT')) {
+            $action = 'reboot';
+        }
+
+        $pin  = null;
+        $card = null;
+        if (preg_match('/PIN=([^\t]+)/', $command, $m)) {
+            $pin = $m[1];
+        }
+        if (preg_match('/Card=([^\t]+)/', $command, $m)) {
+            $card = $m[1];
+        }
+
+        return [$action, $pin, $card];
     }
 
     // ─── Bridge endpoints (local PC polls these) ─────────────────────────────
@@ -285,6 +328,11 @@ class AdmsController extends Controller
                 'sn'    => $sn,
                 'count' => count($commands),
             ]);
+
+            DeviceCommandLog::where('sn', $sn)
+                ->whereIn('cmd_id', array_keys($commands))
+                ->where('status', 'queued')
+                ->update(['status' => 'dispatched', 'dispatched_at' => now()]);
         }
 
         $parsed = [];
@@ -304,8 +352,9 @@ class AdmsController extends Controller
         $sn    = $request->input('sn', config('zkteco.sn', 'HKQ8241900193'));
         $cmdId = $request->input('cmd_id');
         $ok    = (bool) $request->input('success', false);
+        $error = $request->input('error');
 
-        Log::info('ZKTeco bridge ACK', ['sn' => $sn, 'cmd_id' => $cmdId, 'success' => $ok]);
+        Log::info('ZKTeco bridge ACK', ['sn' => $sn, 'cmd_id' => $cmdId, 'success' => $ok, 'error' => $error]);
 
         if ($ok) {
             $key      = "zkteco_commands_{$sn}";
@@ -314,7 +363,62 @@ class AdmsController extends Controller
             Cache::put($key, $commands, now()->addHours(24));
         }
 
+        DeviceCommandLog::where('sn', $sn)->where('cmd_id', $cmdId)->update([
+            'status'        => $ok ? 'success' : 'failed',
+            'error_message' => $ok ? null : ($error ?: 'Bridge reported failure'),
+            'acked_at'      => now(),
+        ]);
+
         return response()->json(['ok' => true]);
+    }
+
+    /**
+     * List device command logs (add/update/delete user, etc.) with filters.
+     * POST/GET: status, action, search (pin/card_number/sn), date_from, date_to, limit, index
+     */
+    public function commandLogs(Request $request)
+    {
+        $limit  = max(1, min(100, (int) $request->input('limit', 20)));
+        $index  = (int) $request->input('index', 0);
+        $status = $request->input('status');
+        $action = $request->input('action');
+        $search = $request->input('search');
+        $dateFrom = $request->input('date_from');
+        $dateTo   = $request->input('date_to');
+
+        $query = DeviceCommandLog::query();
+
+        if ($status) {
+            $query->where('status', $status);
+        }
+        if ($action) {
+            $query->where('action', $action);
+        }
+        if ($search) {
+            $query->where(function ($q) use ($search) {
+                $q->where('pin', 'like', "%{$search}%")
+                    ->orWhere('card_number', 'like', "%{$search}%")
+                    ->orWhere('sn', 'like', "%{$search}%");
+            });
+        }
+        if ($dateFrom) {
+            $query->whereDate('created_at', '>=', Carbon::parse($dateFrom)->toDateString());
+        }
+        if ($dateTo) {
+            $query->whereDate('created_at', '<=', Carbon::parse($dateTo)->toDateString());
+        }
+
+        $total = $query->count();
+        $logs = $query->orderByDesc('created_at')
+            ->offset($index)
+            ->limit($limit)
+            ->get();
+
+        return response()->json([
+            'data' => $logs,
+            'total_count' => $total,
+            'code' => 200,
+        ], 200);
     }
 
     private function parseCommandString(int $id, string $cmd): array

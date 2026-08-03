@@ -75,9 +75,6 @@ class SendPackageExpiryNotifications extends Command
             // Update package status based on expiration date
             $status = ($expireDate <= $today) ? 0 : 1;
             $package->update(['status' => $status]);
-    
-            // Optionally handle the payment updates if needed
-            $this->handlePaymentStatus($package, $expireDate, $today);
         }
     }
 }

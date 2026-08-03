@@ -336,10 +336,10 @@ class PaymentController extends Controller
 
             if (!empty($request->start_date)) {
                 $start_date = date('Y-m-d H:i:s', strtotime($request->start_date));
-                $end_date = Carbon::parse($request->start_date)->addDays($totalDays + 1)->toDateString();
+                $end_date = Carbon::parse($request->start_date)->addDays($totalDays)->toDateString();
             } else {
                 $start_date = date('Y-m-d H:i:s', strtotime($previous_endDate->end_date));
-                $end_date = Carbon::parse($previous_endDate->end_date)->addDays($totalDays + 1)->toDateString();
+                $end_date = Carbon::parse($previous_endDate->end_date)->addDays($totalDays)->toDateString();
             }
 
             // Yearly membership expiry is informational only — do not block renewal.

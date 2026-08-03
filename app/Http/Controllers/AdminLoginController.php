@@ -30,6 +30,7 @@ class AdminLoginController extends Controller
             'user_name' => 'nullable|string',
             'page_access' => 'nullable|array',
             'page_access.*' => 'string|max:100',
+            'balance_sheet_password' => 'nullable|string|min:4',
         ]);
 
         if ($validation->fails()) {
@@ -41,7 +42,7 @@ class AdminLoginController extends Controller
         }
 
         try {
-            $userPayload = $request->only(['name', 'email', 'password', 'role', 'phone', 'user_name']);
+            $userPayload = $request->only(['name', 'email', 'password', 'role', 'phone', 'user_name', 'balance_sheet_password']);
             if (empty($userPayload['phone'])) {
                 $userPayload['phone'] = '';
             }
@@ -293,6 +294,43 @@ class AdminLoginController extends Controller
                 'code' => 500
             ], 200);
         }
+    }
+
+    //verify balance sheet page password (per-admin, set on user create/edit)
+    public function verifyBalancePassword(Request $request)
+    {
+        $validation = Validator::make($request->all(), [
+            'id' => 'required|exists:users,id',
+            'password' => 'required|string',
+        ]);
+
+        if ($validation->fails()) {
+            return response()->json([
+                'message' => $validation->errors(),
+                'code' => 500
+            ], 200);
+        }
+
+        $user = User::find($request->id);
+
+        if (!$user->balance_sheet_password) {
+            return response()->json([
+                'message' => 'Balance sheet password not set for this user',
+                'code' => 500
+            ], 200);
+        }
+
+        if (Hash::check($request->password, $user->balance_sheet_password)) {
+            return response()->json([
+                'message' => 'Password Verified',
+                'code' => 200
+            ], 200);
+        }
+
+        return response()->json([
+            'message' => 'Invalid Password',
+            'code' => 500
+        ], 200);
     }
 
     //admin Login
