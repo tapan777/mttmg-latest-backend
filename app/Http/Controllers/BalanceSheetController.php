@@ -17,6 +17,9 @@ class BalanceSheetController extends Controller
             $index = $request->input('index', 0);
             $searchText = $request->input('search_text', '');
             $dateFilter = $request->input('date', null);
+            // 'entry' (default) filters by created_at (when the record was entered);
+            // 'payment' filters by the transaction's actual payment date.
+            $dateFilterBy = $request->input('date_filter_by', 'entry');
     
             $date_filter_from = '';
             $date_filter_to = '';
@@ -85,7 +88,7 @@ class BalanceSheetController extends Controller
                         ->orWhere('invoices.id', 'like', "%$searchText%");
                 });
     
-            $applyDateFilter($mainPaymentsQuery, 'payments', 'created_at');
+            $applyDateFilter($mainPaymentsQuery, 'payments', $dateFilterBy === 'payment' ? 'date_of_payment' : 'created_at');
     
             $trainerPaymentsQuery = DB::table('trainer_payments')
                 ->select(
@@ -106,7 +109,7 @@ class BalanceSheetController extends Controller
                         ->orWhere('invoices.id', 'like', "%$searchText%");
                 });
     
-            $applyDateFilter($trainerPaymentsQuery, 'trainer_payments', 'created_at');
+            $applyDateFilter($trainerPaymentsQuery, 'trainer_payments', $dateFilterBy === 'payment' ? 'date_of_payment' : 'created_at');
     
             $yearlyPackagesQuery = DB::table('yearly_packages')
                 ->select(
@@ -127,7 +130,7 @@ class BalanceSheetController extends Controller
                         ->orWhere('invoices.id', 'like', "%$searchText%");
                 });
     
-            $applyDateFilter($yearlyPackagesQuery, 'yearly_packages', 'created_at');
+            $applyDateFilter($yearlyPackagesQuery, 'yearly_packages', $dateFilterBy === 'payment' ? 'payment_date' : 'created_at');
     
             $nonRegMembersQuery = DB::table('non_registre_members')
                 ->select(
@@ -146,7 +149,7 @@ class BalanceSheetController extends Controller
                         ->orWhere('non_registre_members.email', 'like', "%$searchText%");
                 });
     
-            $applyDateFilter($nonRegMembersQuery, 'non_registre_members', 'created_at');
+            $applyDateFilter($nonRegMembersQuery, 'non_registre_members', $dateFilterBy === 'payment' ? 'payment_date' : 'created_at');
 
             $steamBathInvoicesQuery = DB::table('invoices')
                 ->select(
@@ -167,7 +170,7 @@ class BalanceSheetController extends Controller
                         ->orWhere('invoices.id', 'like', "%$searchText%");
                 });
 
-            $applyDateFilter($steamBathInvoicesQuery, 'invoices', 'created_at');
+            $applyDateFilter($steamBathInvoicesQuery, 'invoices', $dateFilterBy === 'payment' ? 'steam_bath_payment_date' : 'created_at');
     
             $combinedQuery = $mainPaymentsQuery
                 ->union($trainerPaymentsQuery)

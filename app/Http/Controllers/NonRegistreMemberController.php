@@ -8,7 +8,6 @@ use App\Models\Payment;
 use App\Observers\NonRegisterMemberObserver;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
-use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 
@@ -82,12 +81,11 @@ class NonRegistreMemberController extends Controller
 
     public function update_nonRegistered_member(Request $request)
     {
-        $payload = $request->all();
+        // Personal info only — package/payment fields (offer_package_id, offer,
+        // payble_amount, paying_amount, due, start_date, end_date, payment_date)
+        // are intentionally not accepted here so this endpoint can never alter payments.
+        $payload = $request->only(['name', 'phone', 'email', 'card_number', 'membership_number']);
         $member = NonRegistreMember::find($request->id);
-        Arr::forget($payload, 'id');
-
-        $payload['due'] = $request->payble_amount - $request->paying_amount;
-        $payload['payment_date'] = date('Y-m-d', strtotime($request->payment_date . ' +1 day'));
 
         if ($member) {
             $result = $member->update($payload);

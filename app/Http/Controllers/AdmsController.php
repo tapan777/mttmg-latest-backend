@@ -257,6 +257,16 @@ class AdmsController extends Controller
         return response()->json(['success' => true, 'message' => 'Reboot queued.']);
     }
 
+    public function unlockDoor(Request $request)
+    {
+        $sn = $request->input('sn', config('zkteco.sn', 'HKQ8241900193'));
+        $id = time();
+
+        self::queueCommand($sn, $id, "C:{$id}:AC_UNLOCK");
+
+        return response()->json(['success' => true, 'message' => 'Door unlock queued.']);
+    }
+
     public static function queueCommand(string $sn, int $id, string $command): void
     {
         $key           = "zkteco_commands_{$sn}";
@@ -294,6 +304,8 @@ class AdmsController extends Controller
             $action = 'clear_attendance';
         } elseif (str_contains($command, 'REBOOT')) {
             $action = 'reboot';
+        } elseif (str_contains($command, 'AC_UNLOCK')) {
+            $action = 'unlock_door';
         }
 
         $pin  = null;

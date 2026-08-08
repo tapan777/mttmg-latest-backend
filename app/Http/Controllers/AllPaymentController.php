@@ -235,6 +235,62 @@ class AllPaymentController extends Controller
         }
     }
 
+    // Deletes exactly one payment record from a member's payment history (and,
+    // via the `invoices` table's ON DELETE CASCADE foreign keys, its linked
+    // invoice only). No other table references payments/trainer_payments/
+    // yearly_packages, so this cannot affect any other record.
+    public function deletePaymentRecord(Request $request)
+    {
+        try {
+            $id = $request->input('id');
+            $type = $request->input('payment_type');
+
+            if (!$id || !$type) {
+                return response()->json([
+                    'message' => 'id and payment_type are required',
+                    'code' => 422,
+                ], 200);
+            }
+
+            $modelMap = [
+                'Main Package' => Payment::class,
+                'Trainer Package' => TrainerPayment::class,
+                'Yearly Membership' => YearlyPackage::class,
+            ];
+
+            if (!isset($modelMap[$type])) {
+                return response()->json([
+                    'message' => 'This payment type cannot be deleted from here.',
+                    'code' => 422,
+                ], 200);
+            }
+
+            $record = $modelMap[$type]::find($id);
+
+            if (!$record) {
+                return response()->json([
+                    'message' => 'Record not found',
+                    'code' => 404,
+                ], 200);
+            }
+
+            $record->delete();
+
+            return response()->json([
+                'message' => 'Payment record deleted successfully',
+                'code' => 200,
+            ]);
+        } catch (\Exception $e) {
+            Log::error('Error in deletePaymentRecord: ' . $e->getMessage());
+
+            return response()->json([
+                'message' => 'Something went wrong. Please try again later.',
+                'error' => $e->getMessage(),
+                'code' => 500,
+            ], 500);
+        }
+    }
+
 
     public function expiredPtPackage(Request $request)
     {
@@ -443,59 +499,72 @@ class AllPaymentController extends Controller
             $search_text = $request->search_text;
             $today = Carbon::now('Asia/Kolkata')->format('Y-m-d');
             $dateFilter = $request->input('date', null);
+            // package_status = 1 identifies each member's current/latest package cycle
+            // (it flips to 0 only once they renew). This intentionally does NOT filter
+            // on `due` — a member who fully paid last cycle but hasn't renewed yet still
+            // needs to show here as a pending renewal, even with due = 0.
+            // Once a record has crossed into expired_member's grace window (its own
+            // package duration past end_date), it belongs only on "Expired" — excluded
+            // here so a member is never listed as both pending and expired at once.
             $main_query = Payment::with(['members', 'packages'])
-                ->where('package_status', 1)
-                ->where('end_date', '<=', $today)
-                ->where('due', '>', 0)
+                ->join('packages', 'packages.id', '=', 'payments.package_id')
+                ->where('payments.package_status', 1)
+                ->whereRaw('DATE_ADD(payments.end_date, INTERVAL packages.duration DAY) > ?', [$today])
+                ->select('payments.*')
                 ->limit($limit)
                 ->offset($offset)
-                ->orderBy('end_date', 'desc');
-            if ($dateFilter && isset($dateFilter['type']) && isset($dateFilter['value'])) {
-                if ($dateFilter['type'] == 1 && $dateFilter['value'] != "") {
-                    $check_days = $dateFilter['value'];
+                ->orderBy('payments.end_date', 'desc');
+
+            $hasDateFilter = $dateFilter && isset($dateFilter['type']) && isset($dateFilter['value']) && $dateFilter['value'] !== "";
+
+            if (!$hasDateFilter) {
+                // Default view: pending renewals only (end_date already passed),
+                // regardless of due amount — a fully-paid-but-unrenewed member still
+                // counts as pending. Upcoming/future renewals only show when the user
+                // explicitly picks a future date range via the filter below.
+                $main_query->where('end_date', '<=', $today);
+            } elseif ($dateFilter['type'] == 1) {
+                $check_days = $dateFilter['value'];
+                if ($check_days === 'thisYear') {
+                    $main_query->whereYear('end_date', '=', date('Y'));
+                } else {
                     $filter_date = null;
-                    if (in_array($check_days, ['today', '7days', '30days'])) {
-                        switch ($check_days) {
-                            case 'today':
-                                $filter_date = Carbon::parse($today)->toDateString(); // Today’s date
-                                break;
-                            case '7days':
-                                $filter_date = Carbon::parse($today)->subDays(7)->toDateString(); // 7 days from today
-                                break;
-                            case '30days':
-                                $filter_date = Carbon::parse($today)->subDays(30)->toDateString(); // 30 days from today
-                                break;
-                        }
+                    switch ($check_days) {
+                        case 'today':
+                            $filter_date = $today;
+                            break;
+                        case '7days':
+                            $filter_date = Carbon::parse($today)->subDays(7)->toDateString();
+                            break;
+                        case '30days':
+                            $filter_date = Carbon::parse($today)->subDays(30)->toDateString();
+                            break;
                     }
                     if ($filter_date) {
-                        // dd($filter_date);
                         $main_query->whereBetween('end_date', [$filter_date, $today]);
                     } else {
                         $main_query->where('end_date', '<=', $today);
                     }
-                    if ($search_text) {
-                        $main_query->whereHas('members', function ($query) use ($search_text) {
-                            $query->where('name', 'like', "%{$search_text}%")
-                                ->orWhere('phone', 'like', "%{$search_text}%")
-                                ->orWhere('email', 'like', "%{$search_text}%")
-                                ->orWhere('sex', 'like', "%{$search_text}%");
-                        })->orWhereHas('packages', function ($query) use ($search_text) {
-                            $query->where('name', 'like', "%{$search_text}%");
-                        });
-                    }
                 }
-            }
-
-            if ($dateFilter && $dateFilter['type'] == 1  && $dateFilter['value'] == "thisYear") {
-                // dd("comming to this ");
-                $main_query->whereYear('end_date', '=', date('Y'));
-            }
-            if ($dateFilter && $dateFilter['type'] == 2) {
-                $dates = explode(',',  $dateFilter['value']);
-                $startDate = \Carbon\Carbon::parse($dates[0])->startOfDay();
-                $endDate = \Carbon\Carbon::parse($dates[1])->endOfDay();
+            } elseif ($dateFilter['type'] == 2) {
+                // Custom date range — allowed to include future renewal dates.
+                $dates = explode(',', $dateFilter['value']);
+                $startDate = Carbon::parse($dates[0])->startOfDay();
+                $endDate = Carbon::parse($dates[1])->endOfDay();
                 $main_query->whereBetween('end_date', [$startDate, $endDate]);
             }
+
+            if ($search_text) {
+                $main_query->whereHas('members', function ($query) use ($search_text) {
+                    $query->where('name', 'like', "%{$search_text}%")
+                        ->orWhere('phone', 'like', "%{$search_text}%")
+                        ->orWhere('email', 'like', "%{$search_text}%")
+                        ->orWhere('sex', 'like', "%{$search_text}%");
+                })->orWhereHas('packages', function ($query) use ($search_text) {
+                    $query->where('name', 'like', "%{$search_text}%");
+                });
+            }
+
             $total_count = $main_query->count();
             $main_package_payments = $main_query->get();
             $payments_data = self::get_main_package_payments($main_package_payments);
@@ -617,16 +686,23 @@ class AllPaymentController extends Controller
             $search_text = $request->search_text;
             $today = Carbon::now('Asia/Kolkata')->format('Y-m-d');
             $dateFilter = $request->input('date', null);
+            // A member only counts as truly "expired" once a full extra grace period —
+            // equal to their own package's length (packages.duration, in days) — has
+            // passed since end_date. Right after end_date they still belong on the
+            // "Payment Due" list (see list_payment_due); e.g. a 90-day package that
+            // ended yesterday won't show here until ~90 more days have gone by.
             $main_query = Payment::with(['members', 'packages'])
-                ->where('end_date', '<=', $today)
-                ->where('package_status', 1)
+                ->join('packages', 'packages.id', '=', 'payments.package_id')
+                ->where('payments.package_status', 1)
+                ->whereRaw('DATE_ADD(payments.end_date, INTERVAL packages.duration DAY) <= ?', [$today])
+                ->select('payments.*')
                 ->limit($limit)
                 ->offset($offset)
-                ->orderBy('end_date', 'desc');
-                $total_count_query = Payment::with(['members', 'packages'])
-                ->where('end_date', '<=', $today)
-                ->where('package_status', 1)
-                ->orderBy('end_date', 'desc');
+                ->orderBy('payments.end_date', 'desc');
+                $total_count_query = Payment::query()
+                ->join('packages', 'packages.id', '=', 'payments.package_id')
+                ->where('payments.package_status', 1)
+                ->whereRaw('DATE_ADD(payments.end_date, INTERVAL packages.duration DAY) <= ?', [$today]);
                 $total_count = $total_count_query->count();
 
             if ($dateFilter && isset($dateFilter['type']) && isset($dateFilter['value'])) {

@@ -130,6 +130,7 @@ Route::middleware('auth.token', 'operation.log', 'throttle:60,1')->group(functio
     Route::post("check-due-date", [AllPaymentController::class, 'list_payment_due']); //List of due member
     Route::post("list-due-user", [AllPaymentController::class, 'list_member_due']); //List of due member
     Route::post("payment-history", [AllPaymentController::class, 'allPaymentHistory']); //create payment of trainer package
+    Route::post("payment-history/delete", [AllPaymentController::class, 'deletePaymentRecord']); //delete a single payment history record (and its linked invoice)
     Route::post("search-payments", [AllPaymentController::class, 'searchPayments']); //create payment of trainer package
     Route::post("all-payments-auto-complete", [AllPaymentController::class, 'autoComplete']); //create payment of trainer package
     Route::post("due-payment", [PaymentController::class, 'duePayment']); //Due payment
@@ -292,6 +293,7 @@ Route::middleware('auth.token', 'operation.log', 'throttle:60,1')->group(functio
 
     // Biometric device command logs (add/update/delete user pushed to device)
     Route::post('device-command-logs', [AdmsController::class, 'commandLogs']);
+    Route::post('device/unlock-door', [AdmsController::class, 'unlockDoor']);
 
     //Biomatric
 
