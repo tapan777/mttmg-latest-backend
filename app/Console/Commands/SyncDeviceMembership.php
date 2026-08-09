@@ -45,7 +45,9 @@ class SyncDeviceMembership extends Command
             Log::info("Device sync: removed expired member #{$member->id} ({$member->name})");
         }
 
-        // Members not on device whose latest main-package is still active
+        // Members not on device whose latest main-package is still active AND whose yearly
+        // membership isn't expired more than 5 days (yearly is mandatory for door access —
+        // without this check we'd keep undoing SyncDeviceYearlyMembership's removal every night).
         $renewedMembers = Member::where('on_device', 0)
             ->whereRaw('(
                 SELECT end_date FROM payments
@@ -54,6 +56,11 @@ class SyncDeviceMembership extends Command
                 ORDER BY created_at DESC
                 LIMIT 1
             ) >= ?', [$today])
+            ->whereRaw('(
+                (SELECT end_date FROM yearly_packages WHERE yearly_packages.member_id = members.id ORDER BY yearly_packages.id DESC LIMIT 1) IS NULL
+                OR
+                (SELECT end_date FROM yearly_packages WHERE yearly_packages.member_id = members.id ORDER BY yearly_packages.id DESC LIMIT 1) >= ?
+            )', [$graceCutoff])
             ->get();
 
         foreach ($renewedMembers as $member) {

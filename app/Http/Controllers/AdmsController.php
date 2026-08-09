@@ -142,24 +142,26 @@ class AdmsController extends Controller
                 $date = $carbonTime->format('Y-m-d');
                 $time = $carbonTime->format('H:i:s');
 
+                // One Attendance row per user per date — an employee with morning +
+                // evening slots punches in/out twice, but that's still a single
+                // working day, not two. A later check-in on a day that already has
+                // a row (e.g. the evening slot) must not create a second row; a
+                // check-out always moves the same row's check_out forward.
                 $lastAttendance = Attendance::where('user_id', $userId)
                     ->where('date', $date)
-                    ->latest()
                     ->first();
 
-                if ($status === 0 && (!$lastAttendance || $lastAttendance->check_out)) {
-                    Attendance::create([
-                        'user_id'  => $userId,
-                        'date'     => $date,
-                        'check_in' => $time,
-                        'status'   => 'Present',
-                    ]);
-                } elseif ($status === 1 && $lastAttendance && !$lastAttendance->check_out) {
-                    $checkIn  = Carbon::parse($lastAttendance->check_in);
-                    $checkOut = Carbon::parse($time);
-                    $lastAttendance->check_out  = $time;
-                    $lastAttendance->work_hours = $checkIn->diffInHours($checkOut)
-                        + round($checkIn->diffInMinutes($checkOut) % 60 / 60, 2);
+                if ($status === 0) {
+                    if (!$lastAttendance) {
+                        Attendance::create([
+                            'user_id'  => $userId,
+                            'date'     => $date,
+                            'check_in' => $time,
+                            'status'   => 'Present',
+                        ]);
+                    }
+                } elseif ($status === 1 && $lastAttendance) {
+                    $lastAttendance->check_out = $time;
                     $lastAttendance->save();
                 }
 
@@ -175,6 +177,28 @@ class AdmsController extends Controller
                         'source'      => 'device',
                         'device_sn'   => null,
                     ]);
+
+                    // Recompute total worked hours for the day as the sum of each
+                    // in/out session's duration (morning + evening), not the raw
+                    // span between first check-in and last check-out.
+                    if ($status === 1 && $lastAttendance) {
+                        $dayPunches = EmployeePunchLog::where('employee_id', $userId)
+                            ->where('punch_date', $date)
+                            ->orderBy('punch_time')
+                            ->get();
+                        $totalMinutes = 0;
+                        $openIn = null;
+                        foreach ($dayPunches as $p) {
+                            if ($p->punch_type === 'in') {
+                                $openIn = Carbon::parse($p->punch_time);
+                            } elseif ($p->punch_type === 'out' && $openIn) {
+                                $totalMinutes += $openIn->diffInMinutes(Carbon::parse($p->punch_time));
+                                $openIn = null;
+                            }
+                        }
+                        $lastAttendance->work_hours = round($totalMinutes / 60, 2);
+                        $lastAttendance->save();
+                    }
                 }
             } catch (\Exception $e) {
                 Log::error('ZKTeco attendance error', ['error' => $e->getMessage(), 'line' => $line]);

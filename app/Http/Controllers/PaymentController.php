@@ -570,14 +570,27 @@ class PaymentController extends Controller
                 ], 200);
             }
             $paying_amount = (float) ($request->paying_amount ?? 0);
+            $discount = (float) ($request->discount ?? 0);
             if ($paying_amount <= 0) {
                 return response()->json([
                     'message' => "Paying amount must be greater than 0",
                     'code' => 500
                 ], 200);
             }
+            if ($discount < 0) {
+                return response()->json([
+                    'message' => "Discount cannot be negative",
+                    'code' => 500
+                ], 200);
+            }
             $current_due = (float) ($payment_record->due ?? 0);
-            $new_due = max(0, $current_due - $paying_amount);
+            if ($paying_amount + $discount > $current_due + 0.01) {
+                return response()->json([
+                    'message' => "Paying amount plus discount cannot exceed the due amount",
+                    'code' => 500
+                ], 200);
+            }
+            $new_due = max(0, $current_due - $paying_amount - $discount);
             $date_of_payment = $request->date_of_payment
                 ? date('Y-m-d', strtotime($request->date_of_payment))
                 : now()->format('Y-m-d');            // Log::info($payment_record);
@@ -586,7 +599,7 @@ class PaymentController extends Controller
                 'member_id' =>  $payment_record->member_id,
                 'package_id' => $payment_record->package_id,
                 'bill_no' => $request->bill_no,
-                'offer' => $payment_record->offer,
+                'offer' => $discount,
                 'payble_amount'  => $request->paying_amount,
                 'total_payble_amount'  => $request->paying_amount,
                 'mode_of_payment'  =>  $request->mode_of_payment,

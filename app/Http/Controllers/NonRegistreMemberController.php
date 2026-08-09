@@ -88,8 +88,42 @@ class NonRegistreMemberController extends Controller
         $member = NonRegistreMember::find($request->id);
 
         if ($member) {
+            $oldCardNumber = $member->card_number;
             $result = $member->update($payload);
             if ($result) {
+                // Keep the biometric device's card record in sync whenever the card
+                // number is edited or cleared here — otherwise the old card would
+                // keep working at the door while the system shows a different one.
+                if (array_key_exists('card_number', $payload) && $payload['card_number'] !== $oldCardNumber) {
+                    $isActive = $member->end_date && Carbon::parse($member->end_date)->gte(Carbon::today());
+                    $newCard = $payload['card_number'];
+
+                    if ($newCard && $isActive) {
+                        $sn       = config('zkteco.sn', 'HKQ8241900193');
+                        $pin      = self::DEVICE_PIN_OFFSET + $member->id;
+                        $safeName = str_replace(' ', '_', $member->name);
+                        $cmdId    = time();
+                        AdmsController::queueCommand(
+                            $sn,
+                            $cmdId,
+                            "C:{$cmdId}:DATA UPDATE USERINFO\tPIN={$pin}\tName={$safeName}\tCard={$newCard}\tPri=0"
+                        );
+                        $member->update(['on_device' => 1]);
+                    } elseif (!$newCard && $member->on_device) {
+                        // Card removed — delete the user record from the device entirely
+                        // so the old card can no longer open the door.
+                        $sn    = config('zkteco.sn', 'HKQ8241900193');
+                        $pin   = self::DEVICE_PIN_OFFSET + $member->id;
+                        $cmdId = time();
+                        AdmsController::queueCommand(
+                            $sn,
+                            $cmdId,
+                            "C:{$cmdId}:DATA DELETE USERINFO\tPIN={$pin}"
+                        );
+                        $member->update(['on_device' => 0]);
+                    }
+                }
+
                 return response()->json([
                     'message' => 'Updated Successfully',
                     'code' => 200

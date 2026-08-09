@@ -304,6 +304,22 @@ class MemberController extends Controller
             $index       = $request->index > 0 ? $request->index : 0;
             $hasStatus   = $request->has('status') && $request->status !== null && $request->status !== '';
 
+            // Optional "new joins in period" filter — used by the Dashboard's
+            // New Joins / Today Joined stat cards to drill into just those members.
+            // A member "joined" in a period when their initial (payment_type=0)
+            // package start_date falls within it — same definition Dashboard uses.
+            $joinFrom = $request->input('join_from');
+            $joinTo   = $request->input('join_to');
+            $hasJoinFilter = $joinFrom && $joinTo;
+            $joinMemberIds = null;
+            if ($hasJoinFilter) {
+                $joinMemberIds = Payment::where('payment_type', 0)
+                    ->whereDate('start_date', '>=', $joinFrom)
+                    ->whereDate('start_date', '<=', $joinTo)
+                    ->distinct()
+                    ->pluck('member_id');
+            }
+
             if ($search_text) {
                 $query = Member::query()
                     ->where(function ($q) use ($search_text) {
@@ -315,6 +331,9 @@ class MemberController extends Controller
 
                 if ($hasStatus) {
                     $query->where('status', $request->status);
+                }
+                if ($hasJoinFilter) {
+                    $query->whereIn('id', $joinMemberIds);
                 }
 
                 $total_count = $query->count();
@@ -482,6 +501,9 @@ class MemberController extends Controller
 
                 if ($hasStatus) {
                     $query->where('status', $request->status);
+                }
+                if ($hasJoinFilter) {
+                    $query->whereIn('id', $joinMemberIds);
                 }
 
                 $total_count = $query->count();

@@ -96,7 +96,8 @@ class DashboardController extends Controller
         $total_due           = $payment_due + $trainer_payment_due + $nr_payment_due;
 
         // ── Period totals (monthly or yearly) ──
-        $period_new_members  = $applyPeriod(Member::query())->count();
+        $period_new_members  = $applyPeriod(Payment::where('payment_type', 0), 'start_date')
+            ->distinct('member_id')->count('member_id');
         $period_new_pt       = $applyPeriod(TrainerPayment::where('payment_type', 0))->count();
         $period_enquiries    = $applyPeriod(Followup::query())->count();
 
@@ -134,6 +135,9 @@ class DashboardController extends Controller
             ->sum('steam_bath_amount');
         $today_total_payments = $today_main_pay + $today_trainer_pay + $today_nr_pay + $today_yearly_pay + $today_steam_pay;
         $today_attendance     = Attendance::whereDate('date', $today)->count();
+        $today_new_members    = Payment::where('payment_type', 0)
+            ->whereDate('start_date', $today)
+            ->distinct('member_id')->count('member_id');
 
         // ── Upcoming renewals in period ──
         $renewalQ = Payment::where('payment_type', 0)->where('package_status', 1);
@@ -193,6 +197,7 @@ class DashboardController extends Controller
             'today_trainer_pay'        => $today_trainer_pay,
             'today_steam_pay'          => $today_steam_pay,
             'today_attendance'         => $today_attendance,
+            'today_new_members'        => $today_new_members,
 
             'sms_balance' => $sms_balance,
             'code'        => 200,
@@ -384,6 +389,7 @@ class DashboardController extends Controller
             // Main query to get member details along with latest payment info
             $baseQuery = DB::table('trainer_payments')
                 ->join('members', 'trainer_payments.member_id', '=', 'members.id')
+                ->leftJoin('employees', 'trainer_payments.employee_id', '=', 'employees.id')
                 ->joinSub($subQuery, 'latest_payments', function ($join) {
                     $join->on('trainer_payments.member_id', '=', 'latest_payments.member_id')
                         ->on('trainer_payments.end_date', '=', 'latest_payments.max_end_date');
@@ -394,6 +400,7 @@ class DashboardController extends Controller
                     'members.phone',
                     'members.image',
                     'members.email',
+                    'employees.name as trainer_name',
                     'trainer_payments.end_date as expire_date',
                     'trainer_payments.payment_type'
                 );

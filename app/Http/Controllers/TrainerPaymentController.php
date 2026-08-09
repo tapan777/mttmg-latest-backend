@@ -381,13 +381,41 @@ class TrainerPaymentController extends Controller
         try {
             $payment_id = $request->payment_id;
             $payment_record = TrainerPayment::where('id', $payment_id)->latest()->first();
+            if (!$payment_record) {
+                return response()->json([
+                    'message' => "Payment record not found",
+                    'code' => 500
+                ], 200);
+            }
+            $paying_amount = (float) ($request->paying_amount ?? 0);
+            $discount = (float) ($request->discount ?? 0);
+            if ($paying_amount <= 0) {
+                return response()->json([
+                    'message' => "Paying amount must be greater than 0",
+                    'code' => 500
+                ], 200);
+            }
+            if ($discount < 0) {
+                return response()->json([
+                    'message' => "Discount cannot be negative",
+                    'code' => 500
+                ], 200);
+            }
+            $current_due = (float) ($payment_record->due ?? 0);
+            if ($paying_amount + $discount > $current_due + 0.01) {
+                return response()->json([
+                    'message' => "Paying amount plus discount cannot exceed the due amount",
+                    'code' => 500
+                ], 200);
+            }
+            $new_due = max(0, $current_due - $paying_amount - $discount);
             $date_of_payment = date('Y-m-d', strtotime($request->date_of_payment ));
             // Log::info($payment_record);
             // dd($payment_record->trainer_package_id);
             $create_due_payment = [
                 'member_id' =>  $payment_record->member_id,
                 'trainer_package_id' => $payment_record->trainer_package_id,
-                'offer' => $payment_record->offer,
+                'offer' => $discount,
                 'payble_amount'  => $request->paying_amount,
                 'total_payble_amount'  => $request->paying_amount,
                 'mode_of_payment'  =>  $request->mode_of_payment,
@@ -401,23 +429,23 @@ class TrainerPaymentController extends Controller
 
             $data = TrainerPayment::create($create_due_payment);
             if ($data) {
-                $model = TrainerPayment::where('member_id', $payment_record->member_id)
-                    ->where('payment_type', '!=', 1)->update(['due' => 0]);
-                if ($model) {
-                    $member   = Member::select('name', 'phone')->where('id', $payment_record->member_id)->first();
-                    $pkg_name = TrainerPackage::where('id', $payment_record->trainer_package_id)->value('name') ?? '';
+                $payment_record->due = $new_due;
+                $payment_record->save();
 
-                    event(new SendWhatsAppNotification(
-                        'payment_received_confirmation',
-                        [$member->name, $request->paying_amount, $pkg_name],
-                        [$member->phone]
-                    ));
+                $member   = Member::select('name', 'phone')->where('id', $payment_record->member_id)->first();
+                $pkg_name = TrainerPackage::where('id', $payment_record->trainer_package_id)->value('name') ?? '';
 
-                    return response()->json([
-                        'message' => "Due Payment Successfull",
-                        'code' => 200
-                    ], 200);
-                }
+                event(new SendWhatsAppNotification(
+                    'payment_received_confirmation',
+                    [$member->name, $request->paying_amount, $pkg_name],
+                    [$member->phone]
+                ));
+
+                return response()->json([
+                    'message' => "Due Payment Successfull",
+                    'code' => 200,
+                    'remaining_due' => $new_due,
+                ], 200);
             } else {
                 return response()->json([
                     'message' => "Due Payment Failed",
