@@ -137,6 +137,7 @@ Route::middleware('auth.token', 'operation.log', 'throttle:60,1')->group(functio
     Route::post("member-due-payment", [PaymentController::class, 'members_due']); //Member Due payment
     Route::post("expired-member", [AllPaymentController::class, 'expired_member']); //Check due by day
     Route::post("expired-yearly-membership", [AllPaymentController::class, 'expired_yearly_membership']); //Admin notification list: yearly membership expired/expiring soon
+    Route::post("yearly-membership-expired", [AllPaymentController::class, 'list_yearly_membership_expired']); //Yearly membership already expired as of today (List Due Users tab)
     Route::post("payment/due-pt-package", [AllPaymentController::class, 'duePtPackage']); //Check due by day
     Route::post("payment/due-pt-package-autocomplete", [AllPaymentController::class, 'autoComplete_ptPackage_due']); //Auto complete of pt package
     Route::post("payment/due-member-autocomplete", [AllPaymentController::class, 'dueMemberAutoComplete']); //Auto complete of pt package

@@ -124,16 +124,26 @@ class FixAttendanceWorkHours extends Command
             if ($openIn === null) {
                 return;
             }
+            // An early check-in (within the 30-min grace before slot start) is
+            // valid attendance for the slot, but doesn't earn extra paid minutes
+            // — credit from the slot's official start, never earlier.
+            $creditedStart = $openIn;
+            foreach ($slotRanges as [$start, $end]) {
+                if ($openIn->between($start->copy()->subMinutes(30), $end) && $openIn->lt($start)) {
+                    $creditedStart = $start;
+                    break;
+                }
+            }
             if ($atTime !== null) {
-                $totalMinutes += max(0, $openIn->diffInMinutes($atTime));
+                $totalMinutes += max(0, $creditedStart->diffInMinutes($atTime));
             } else {
                 // No closing "out" punch — only credit up to the end of the
                 // slot this check-in belongs to (mirrors what the slot-end
                 // auto-checkout would have done), never a blanket full day.
                 foreach ($slotRanges as [$start, $end]) {
-                    $windowStart = $start->copy()->subHours(2);
+                    $windowStart = $start->copy()->subMinutes(30);
                     if ($openIn->between($windowStart, $end)) {
-                        $totalMinutes += max(0, $openIn->diffInMinutes($end));
+                        $totalMinutes += max(0, $creditedStart->diffInMinutes($end));
                         break;
                     }
                 }
@@ -144,9 +154,16 @@ class FixAttendanceWorkHours extends Command
         foreach ($dayPunches as $p) {
             $time = Carbon::parse("$date {$p->punch_time}");
             if ($p->punch_type === 'in') {
-                // A second "in" without a prior "out" — close the previous
-                // open session using the slot-end estimate before starting
-                // the new one, instead of silently discarding it.
+                // A duplicate/double-scan "in" arriving seconds or a couple of
+                // minutes after the currently-open one is a device glitch, not
+                // a new session — closing-and-reopening for it would credit a
+                // whole extra slot for a tap that lasted a few seconds. Ignore it.
+                if ($openIn !== null && $openIn->diffInMinutes($time) < 5) {
+                    continue;
+                }
+                // A genuine second "in" without a prior "out" — close the
+                // previous open session using the slot-end estimate before
+                // starting the new one, instead of silently discarding it.
                 $closeOpenSession();
                 $openIn = $time;
             } elseif ($p->punch_type === 'out' && $openIn) {

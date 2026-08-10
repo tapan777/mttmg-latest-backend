@@ -155,7 +155,7 @@ class MergeDuplicateAttendance extends Command
                 continue;
             }
             [$start, $end] = $range;
-            $windowStart = $start->copy()->subHours(2);
+            $windowStart = $start->copy()->subMinutes(30);
 
             $matched = $inTimes->contains(fn ($t) => $t->between($windowStart, $end));
             if ($matched) {

@@ -511,8 +511,6 @@ class AllPaymentController extends Controller
                 ->where('payments.package_status', 1)
                 ->whereRaw('DATE_ADD(payments.end_date, INTERVAL packages.duration DAY) > ?', [$today])
                 ->select('payments.*')
-                ->limit($limit)
-                ->offset($offset)
                 ->orderBy('payments.end_date', 'desc');
 
             $hasDateFilter = $dateFilter && isset($dateFilter['type']) && isset($dateFilter['value']) && $dateFilter['value'] !== "";
@@ -565,8 +563,11 @@ class AllPaymentController extends Controller
                 });
             }
 
+            // Count before applying limit/offset — count() otherwise inherits
+            // them too, capping total_count at ~$limit and breaking pagination
+            // (the "next page" button disables after the very first page).
             $total_count = $main_query->count();
-            $main_package_payments = $main_query->get();
+            $main_package_payments = $main_query->limit($limit)->offset($offset)->get();
             $payments_data = self::get_main_package_payments($main_package_payments);
             if ($payments_data != null) {
                 return response()->json([
@@ -644,6 +645,109 @@ class AllPaymentController extends Controller
             return response()->json([
                 'data' => $data,
                 'total_count' => $total_count,
+                'code' => 200
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => 'Something went wrong!',
+                'error' => $e->getMessage(),
+                'code' => 500
+            ], 200);
+        }
+    }
+
+    // Members whose yearly membership has already expired as of today (strict —
+    // no upcoming/soon-to-expire window, unlike expired_yearly_membership above).
+    // Only the latest yearly_package per member is considered.
+    public function list_yearly_membership_expired(Request $request)
+    {
+        try {
+            $limit = $request->limit > 0 ? $request->limit : 10;
+            $offset = $request->index > 0 ? $request->index : 0;
+            $search_text = $request->search_text;
+            $today = Carbon::now('Asia/Kolkata')->toDateString();
+            $dateFilter = $request->input('date', null);
+
+            $latestYearlyIds = YearlyPackage::selectRaw('MAX(id) as id')
+                ->groupBy('member_id')
+                ->pluck('id');
+
+            $query = YearlyPackage::with('members')
+                ->whereIn('id', $latestYearlyIds);
+
+            $hasDateFilter = $dateFilter && isset($dateFilter['type']) && isset($dateFilter['value']) && $dateFilter['value'] !== "";
+
+            if (!$hasDateFilter) {
+                // Default view: already expired only.
+                $query->where('end_date', '<=', $today);
+            } elseif ($dateFilter['type'] == 1) {
+                $check_days = $dateFilter['value'];
+                if ($check_days === 'thisYear') {
+                    $query->whereYear('end_date', '=', date('Y'));
+                } else {
+                    $filter_date = null;
+                    switch ($check_days) {
+                        case 'today':
+                            $filter_date = $today;
+                            break;
+                        case '7days':
+                            $filter_date = Carbon::parse($today)->subDays(7)->toDateString();
+                            break;
+                        case '30days':
+                            $filter_date = Carbon::parse($today)->subDays(30)->toDateString();
+                            break;
+                    }
+                    if ($filter_date) {
+                        $query->whereBetween('end_date', [$filter_date, $today]);
+                    } else {
+                        $query->where('end_date', '<=', $today);
+                    }
+                }
+            } elseif ($dateFilter['type'] == 2) {
+                $dates = explode(',', $dateFilter['value']);
+                $startDate = Carbon::parse($dates[0])->startOfDay();
+                $endDate = Carbon::parse($dates[1])->endOfDay();
+                $query->whereBetween('end_date', [$startDate, $endDate]);
+            }
+
+            if ($search_text) {
+                $query->whereHas('members', function ($q) use ($search_text) {
+                    $q->where('name', 'like', "%{$search_text}%")
+                        ->orWhere('phone', 'like', "%{$search_text}%")
+                        ->orWhere('email', 'like', "%{$search_text}%")
+                        ->orWhere('membership_number', 'like', "%{$search_text}%");
+                });
+            }
+
+            // Count before applying limit/offset — see list_payment_due for why
+            // counting after limit/offset breaks pagination.
+            $total_count = (clone $query)->count();
+
+            $data = $query->orderBy('end_date', 'desc')
+                ->offset($offset)
+                ->limit($limit)
+                ->get()
+                ->map(function ($yearlyPackage) use ($today) {
+                    $member = $yearlyPackage->members;
+                    return [
+                        'yearly_package_id' => $yearlyPackage->id,
+                        'member_id'         => $yearlyPackage->member_id,
+                        'name'              => $member->name ?? null,
+                        'membership_number' => $member->membership_number ?? null,
+                        'phone'             => $member->phone ?? null,
+                        'email'             => $member->email ?? null,
+                        'gender'            => $member->sex ?? null,
+                        'image'             => $member->image ?? null,
+                        'package_amount'    => $yearlyPackage->package_amount,
+                        'end_date'          => date('d-m-Y', strtotime($yearlyPackage->end_date)),
+                        'days_expired'      => Carbon::parse($yearlyPackage->end_date)->diffInDays(Carbon::parse($today), false),
+                    ];
+                });
+
+            return response()->json([
+                'data' => $data,
+                'total_count' => $total_count,
+                'message' => 'success',
                 'code' => 200
             ]);
         } catch (\Exception $e) {

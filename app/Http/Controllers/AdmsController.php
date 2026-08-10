@@ -182,6 +182,12 @@ class AdmsController extends Controller
                     // in/out session's duration (morning + evening), not the raw
                     // span between first check-in and last check-out.
                     if ($status === 1 && $lastAttendance) {
+                        $employee = Employee::find($userId);
+                        $slotRanges = $employee ? array_values(array_filter(array_map(
+                            fn ($s) => $this->parseSlotRange($s, $date),
+                            [$employee->morning_slot, $employee->evening_slot]
+                        ))) : [];
+
                         $dayPunches = EmployeePunchLog::where('employee_id', $userId)
                             ->where('punch_date', $date)
                             ->orderBy('punch_time')
@@ -190,9 +196,28 @@ class AdmsController extends Controller
                         $openIn = null;
                         foreach ($dayPunches as $p) {
                             if ($p->punch_type === 'in') {
-                                $openIn = Carbon::parse($p->punch_time);
+                                $punchTime = Carbon::parse($p->punch_time);
+                                // A duplicate/double-scan "in" arriving seconds or a
+                                // couple of minutes after the currently-open one is a
+                                // device glitch, not a new session — ignore it rather
+                                // than shifting the credited start time.
+                                if ($openIn !== null && $openIn->diffInMinutes($punchTime) < 5) {
+                                    continue;
+                                }
+                                $openIn = $punchTime;
                             } elseif ($p->punch_type === 'out' && $openIn) {
-                                $totalMinutes += $openIn->diffInMinutes(Carbon::parse($p->punch_time));
+                                // An early check-in (within the 30-min grace before slot
+                                // start) is valid attendance for the slot, but doesn't earn
+                                // extra paid minutes — credit from the slot's official
+                                // start, never earlier.
+                                $creditedStart = $openIn;
+                                foreach ($slotRanges as [$slotStart, $slotEnd]) {
+                                    if ($openIn->between($slotStart->copy()->subMinutes(30), $slotEnd) && $openIn->lt($slotStart)) {
+                                        $creditedStart = $slotStart;
+                                        break;
+                                    }
+                                }
+                                $totalMinutes += $creditedStart->diffInMinutes(Carbon::parse($p->punch_time));
                                 $openIn = null;
                             }
                         }
@@ -203,6 +228,39 @@ class AdmsController extends Controller
             } catch (\Exception $e) {
                 Log::error('ZKTeco attendance error', ['error' => $e->getMessage(), 'line' => $line]);
             }
+        }
+    }
+
+    /**
+     * Mirrors AutoCheckoutEmployees::parseSlotRange — parses a slot string like
+     * "6:00 AM - 2:00 PM" into [startCarbon, endCarbon] for the given date.
+     */
+    private function parseSlotRange(?string $slot, string $date): ?array
+    {
+        $slot = trim((string) $slot);
+        if ($slot === '') {
+            return null;
+        }
+
+        $parts = preg_split('/\s*[-–]\s*(?=\d)|(\s+to\s+)/i', $slot, 2);
+        if (!$parts || count($parts) < 2) {
+            return null;
+        }
+
+        $startStr = trim($parts[0]);
+        $endStr   = trim($parts[1]);
+
+        try {
+            $start = Carbon::parse("$date $startStr");
+            $end   = Carbon::parse("$date $endStr");
+
+            if ($end->lt($start)) {
+                $end->addDay();
+            }
+
+            return [$start, $end];
+        } catch (\Throwable) {
+            return null;
         }
     }
 

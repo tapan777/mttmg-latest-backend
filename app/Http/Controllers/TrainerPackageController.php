@@ -176,7 +176,7 @@ class TrainerPackageController extends Controller
     //package dropdown
     public function trainer_package_drop_down()
     {
-        $package_details = TrainerPackage::get(['id', 'name']);
+        $package_details = TrainerPackage::get(['id', 'name', 'duration']);
         if ($package_details) {
             return response()->json([
                 'data' => $package_details,

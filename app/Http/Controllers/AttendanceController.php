@@ -104,21 +104,45 @@ class AttendanceController extends Controller
                 ->limit($limit)
                 ->get()
                 ->map(function ($item) use ($type) {
+                    $rawDate = $item->date;
                     if ($item->employee) {
                         $item->user_name = $item->employee->name;
                         $item->phone = $item->employee->phone;
                         $item->user_type = 'employee';
                         $item->designation = $item->employee->designation;
+                        $item->morning_slot = $item->employee->morning_slot;
+                        $item->evening_slot = $item->employee->evening_slot;
+
+                        // Give split-shift employees their per-session punches so
+                        // the UI can show Morning/Evening separately instead of
+                        // one collapsed check_in/check_out span for the whole day.
+                        $logs = EmployeePunchLog::where('employee_id', $item->user_id)
+                            ->where('punch_date', $rawDate)
+                            ->orderBy('punch_time')
+                            ->get();
+                        $deduped = [];
+                        foreach ($logs as $log) {
+                            $last = end($deduped);
+                            if ($last && $last['type'] === $log->punch_type
+                                && (strtotime($log->punch_time) - strtotime($last['time'])) / 60 < 5) {
+                                continue;
+                            }
+                            $deduped[] = ['time' => $log->punch_time, 'type' => $log->punch_type];
+                        }
+                        $item->punches = array_map(fn ($l) => [
+                            'time' => date('h:i A', strtotime($l['time'])),
+                            'type' => $l['type'],
+                        ], $deduped);
                     } elseif ($item->members) {
                         $item->user_name = $item->members->name;
                         $item->phone = $item->members->phone;
                         $item->user_type = 'member';
                     }
-    
+
                     $item->date = date('d-m-Y', strtotime($item->date));
                     $item->check_in = date('h:i A', strtotime($item->check_in));
                     $item->check_out = $item->check_out ? date('h:i A', strtotime($item->check_out)) : null;
-    
+
                     unset($item->members, $item->employee);
                     return $item;
                 });
@@ -162,16 +186,37 @@ class AttendanceController extends Controller
             // Pre-load all punch logs for this employee for the month (single query)
             $punchLogsByDate = [];
             if ($isEmployee) {
+                $rawPunchLogsByDate = [];
                 EmployeePunchLog::where('employee_id', $userId)
                     ->whereBetween('punch_date', [$startDate, $endDate])
                     ->orderBy('punch_time')
                     ->get()
-                    ->each(function ($log) use (&$punchLogsByDate) {
-                        $punchLogsByDate[$log->punch_date][] = [
-                            'time' => date('h:i A', strtotime($log->punch_time)),
+                    ->each(function ($log) use (&$rawPunchLogsByDate) {
+                        $rawPunchLogsByDate[$log->punch_date][] = [
+                            'time' => $log->punch_time,
                             'type' => $log->punch_type,
                         ];
                     });
+
+                // Collapse duplicate/double-scan punches (same type, a few
+                // minutes apart — a device glitch, not two real events) into
+                // one, so the punch timeline and its counts (and anything
+                // downstream, like salary calculation) only ever see one.
+                foreach ($rawPunchLogsByDate as $date => $logs) {
+                    $deduped = [];
+                    foreach ($logs as $log) {
+                        $last = end($deduped);
+                        if ($last && $last['type'] === $log['type']
+                            && (strtotime($log['time']) - strtotime($last['time'])) / 60 < 5) {
+                            continue;
+                        }
+                        $deduped[] = $log;
+                    }
+                    $punchLogsByDate[$date] = array_map(fn ($l) => [
+                        'time' => date('h:i A', strtotime($l['time'])),
+                        'type' => $l['type'],
+                    ], $deduped);
+                }
             }
 
             $totalCount = Attendance::where('user_id', $userId)

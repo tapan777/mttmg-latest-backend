@@ -89,7 +89,7 @@ class PackagesController extends Controller
     //package dropdown
     public function drop_down()
     {
-        $package_details = Package::where('package_type', 0)->get(['id', 'name']);
+        $package_details = Package::where('package_type', 0)->get(['id', 'name', 'duration']);
 
         if ($package_details) {
             return response()->json([
