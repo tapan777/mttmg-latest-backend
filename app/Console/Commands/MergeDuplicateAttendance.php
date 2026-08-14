@@ -53,35 +53,25 @@ class MergeDuplicateAttendance extends Command
                     ->get()
                 : collect();
 
-            // Priority 1: match each defined slot (morning/evening) against the
-            // day's "in" punches and sum that slot's own duration. Most reliable
-            // for multi-session days since it doesn't need a matching "out" punch
-            // at all (checkouts here are frequently auto-generated, not swiped).
-            if ($employee) {
-                $matched = $this->matchedSlotHours($employee, $dayPunches, $group->date);
-                if ($matched !== null && $matched > 0) {
-                    $workHours = $matched;
-                }
-            }
-
-            // Priority 2: sum complete in/out pairs from the punch log.
-            if ($workHours === null && $dayPunches->isNotEmpty()) {
-                $totalMinutes = 0;
-                $openIn = null;
-                foreach ($dayPunches as $p) {
-                    if ($p->punch_type === 'in') {
-                        $openIn = Carbon::parse($p->punch_time);
-                    } elseif ($p->punch_type === 'out' && $openIn) {
-                        $totalMinutes += $openIn->diffInMinutes(Carbon::parse($p->punch_time));
-                        $openIn = null;
+            // Priority 1: one session per slot — first "in" to last "out" within
+            // that slot's window (or slot end if never scanned out), capped at
+            // the slot's official start/end. Same algorithm as
+            // AutoCheckoutEmployees::computeWorkedHoursAcrossSlots, so a
+            // consolidated row's hours match what any other recompute would give.
+            if ($employee && $dayPunches->isNotEmpty()) {
+                $slotRanges = array_values(array_filter(array_map(
+                    fn ($s) => $this->parseSlotRange($s, $group->date),
+                    [$employee->morning_slot, $employee->evening_slot]
+                )));
+                if (!empty($slotRanges)) {
+                    $computed = $this->computeWorkedHoursAcrossSlots($group->user_id, $group->date, $slotRanges);
+                    if ($computed > 0) {
+                        $workHours = $computed;
                     }
                 }
-                if ($totalMinutes > 0) {
-                    $workHours = round($totalMinutes / 60, 2);
-                }
             }
 
-            // Priority 3: one of the duplicate rows may already carry a correct
+            // Priority 2: one of the duplicate rows may already carry a correct
             // work_hours value set directly by AutoCheckoutEmployees.
             if ($workHours === null) {
                 $existingWorkHours = $rows->pluck('work_hours')->filter(fn ($v) => $v !== null && (float) $v > 0)->sort()->last();
@@ -90,7 +80,7 @@ class MergeDuplicateAttendance extends Command
                 }
             }
 
-            // Priority 4: raw check_in/check_out span — ONLY safe for a single
+            // Priority 3: raw check_in/check_out span — ONLY safe for a single
             // "in" punch that day; otherwise the span spans across the gap
             // between shifts and re-inflates the exact bug being fixed here.
             $inPunchCount = $dayPunches->where('punch_type', 'in')->count();
@@ -133,37 +123,50 @@ class MergeDuplicateAttendance extends Command
     }
 
     /**
-     * Sum the duration of each defined slot (morning/evening) that has a
-     * matching "in" punch somewhere in [slotStart - 2h, slotEnd] — the same
-     * matching window AutoCheckoutEmployees uses to resolve which slot a
-     * check-in belongs to. Returns null if the employee has no slots defined.
+     * Sum worked minutes across the day, one session per slot. For each slot,
+     * takes the first "in" and the last "out" within that slot's window (or
+     * the slot's end if never scanned out), capped at the slot's official
+     * start/end. Mirrors AutoCheckoutEmployees::computeWorkedHoursAcrossSlots.
      */
-    private function matchedSlotHours(Employee $employee, $dayPunches, string $date): ?float
+    private function computeWorkedHoursAcrossSlots(int $employeeId, string $date, array $slotRanges): float
     {
-        $slots = array_filter([$employee->morning_slot, $employee->evening_slot]);
-        if (empty($slots)) {
-            return null;
-        }
+        $dayPunches = EmployeePunchLog::where('employee_id', $employeeId)
+            ->where('punch_date', $date)
+            ->orderBy('punch_time')
+            ->get();
 
-        $inTimes = $dayPunches->where('punch_type', 'in')
-            ->map(fn ($p) => Carbon::parse("$date {$p->punch_time}"));
+        $totalMinutes = 0;
 
-        $totalHours = 0.0;
-        foreach ($slots as $slot) {
-            $range = $this->parseSlotRange($slot, $date);
-            if (!$range) {
+        foreach ($slotRanges as [$start, $end]) {
+            $windowStart = $start->copy()->subMinutes(30);
+            $slotPunches = $dayPunches->filter(function ($p) use ($date, $windowStart, $end) {
+                $t = Carbon::parse("$date {$p->punch_time}");
+                return $t->between($windowStart, $end);
+            });
+            if ($slotPunches->isEmpty()) {
                 continue;
             }
-            [$start, $end] = $range;
-            $windowStart = $start->copy()->subMinutes(30);
 
-            $matched = $inTimes->contains(fn ($t) => $t->between($windowStart, $end));
-            if ($matched) {
-                $totalHours += $start->diffInMinutes($end) / 60;
+            $firstIn = $slotPunches->firstWhere('punch_type', 'in');
+            if (!$firstIn) {
+                continue;
             }
+            $inTime = Carbon::parse("$date {$firstIn->punch_time}");
+            $creditedStart = $inTime->lt($start) ? $start : $inTime;
+
+            $lastOut = $slotPunches->where('punch_type', 'out')->sortByDesc('punch_time')->first();
+            $endTime = $lastOut ? Carbon::parse("$date {$lastOut->punch_time}") : $end;
+            if ($endTime->gt($end)) {
+                $endTime = $end;
+            }
+            if ($endTime->lt($creditedStart)) {
+                $endTime = $end;
+            }
+
+            $totalMinutes += max(0, $creditedStart->diffInMinutes($endTime));
         }
 
-        return round($totalHours, 2);
+        return round($totalMinutes / 60, 2);
     }
 
     /**

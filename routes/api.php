@@ -25,6 +25,7 @@ use App\Http\Controllers\AdmissionChargesController;
 use App\Http\Controllers\AttendanceController;
 use App\Http\Controllers\SteamBathController;
 use App\Http\Controllers\SalaryController;
+use App\Http\Controllers\HolidayController;
 use App\Http\Controllers\DietPlanController;
 use App\Models\SteamBath;
 use App\Http\Controllers\DietUserAssignmentController;
@@ -57,6 +58,12 @@ Route::middleware('auth.token', 'operation.log', 'throttle:60,1')->group(functio
 
 
     Route::post('salary/generate', [SalaryController::class, 'generateSalary']);
+    Route::post('salary/leave-days/get', [SalaryController::class, 'getLeaveDays']);
+    Route::post('salary/leave-days/set', [SalaryController::class, 'setLeaveDays']);
+    Route::get('holidays', [HolidayController::class, 'index']);
+    Route::post('holidays', [HolidayController::class, 'store']);
+    Route::post('holidays/{id}/update', [HolidayController::class, 'update']);
+    Route::post('holidays/{id}/delete', [HolidayController::class, 'destroy']);
     //User Api
     Route::post("update-user", [AdminLoginController::class, 'userUpdate']); //Update User
     Route::post("verify-balance-password", [AdminLoginController::class, 'verifyBalancePassword']); //Verify Balance Sheet Page Password
@@ -284,6 +291,7 @@ Route::middleware('auth.token', 'operation.log', 'throttle:60,1')->group(functio
     Route::post('/members/total-due', [DashboardController::class, 'getTotalDueWithPagination']);
     Route::post('/active-pt-payments', [DashboardController::class, 'getActivePTPayments']);
     Route::post('/get/payment/summary', [DashboardController::class, 'getPaymentSummary']);
+    Route::post('/dashboard/payment-breakdown', [DashboardController::class, 'paymentBreakdown']);
     Route::post("biomatric/totalwork-hour", [AttendanceController::class, 'getCurrentMonthWorkHours']);
     Route::post('/monthly-attendance', [AttendanceController::class, 'getMonthlyAttendance']);
 
@@ -296,26 +304,14 @@ Route::middleware('auth.token', 'operation.log', 'throttle:60,1')->group(functio
     Route::post('device-command-logs', [AdmsController::class, 'commandLogs']);
     Route::post('device/unlock-door', [AdmsController::class, 'unlockDoor']);
 
-    //Biomatric
-
-    // Route::get("get/data/from/biomatric", [BiomatricController::class, 'setUser']);
-
     // steam bath
     Route::post('/steam-bath/store', [SteamBathController::class, 'store_bath'])->name('store.steam.bath');
     Route::post('use/steam-bath', [SteamBathController::class, 'use_bath'])->name('use.steam.bath');
 });
-Route::get("biomatric/check-connection", [BiomatricController::class, 'checkConnection']);
-Route::get("biomatric/authenticate", [BiomatricController::class, 'setBiomatricData']);
-Route::get("biomatric/set-user-data", [BiomatricController::class, 'setUserData']);
-
-Route::get("biomatric/get-attendance", [BiomatricController::class, 'get_attendance']);
-Route::get("biomatric/store-attendance", [AttendanceController::class, 'store']);
 Route::post("biomatric/retrive-attendance", [AttendanceController::class, 'index']);
 Route::post("biomatric/mannual-checkout", [AttendanceController::class, 'check_out']);
 Route::get("biomatric/checkout-notification", [AttendanceController::class, 'send_notification_for_checkout']);
-
-
-Route::post('/biomatric/device-push', [BiomatricController::class, 'receiveFromDevice']);
+Route::get("biomatric/store-attendance", [AdmsController::class, 'requestFullResync']);
 
 // ADMS interactive command APIs
 Route::get('/adms/status', [AdmsController::class, 'deviceStatus']);

@@ -88,6 +88,17 @@ class AutoCheckoutEmployees extends Command
                     continue; // wait until end of day
                 }
                 $slotEndTime = $midnight;
+            } else {
+                // A split-shift employee's morning slot ending does NOT mean their
+                // day is done — closing the Attendance row right away would freeze
+                // work_hours at just that one slot and silently drop the evening
+                // session once it happens. Wait until the day's LAST slot ends.
+                $allSlots = $this->allSlotRanges($employee, $now);
+                $lastSlotEnd = end($allSlots)[1];
+                if ($now->lt($lastSlotEnd)) {
+                    continue;
+                }
+                $slotEndTime = $lastSlotEnd;
             }
 
             // Only checkout if current time has passed slot end time
@@ -97,15 +108,10 @@ class AutoCheckoutEmployees extends Command
 
             try {
                 $checkOutStr = $slotEndTime->format('H:i:s');
-                // An early check-in (within the 30-min grace before slot start) is a
-                // valid attendance for the slot, but doesn't earn extra paid minutes —
-                // hours are credited from the slot's official start, never earlier.
-                $creditedStart = $outOfSlot
-                    ? $checkInTime
-                    : ($checkInTime->lt($slotRange[0]) ? $slotRange[0] : $checkInTime);
-                $workHours   = $outOfSlot ? 0 : (
-                    $creditedStart->diffInHours($slotEndTime)
-                    + round($creditedStart->diffInMinutes($slotEndTime) % 60 / 60, 2)
+                $workHours   = $outOfSlot ? 0 : $this->computeWorkedHoursAcrossSlots(
+                    $employee->id,
+                    $attendance->date,
+                    $allSlots
                 );
 
                 $attendance->check_out  = $checkOutStr;
@@ -142,6 +148,80 @@ class AutoCheckoutEmployees extends Command
                 ]);
             }
         }
+    }
+
+    /**
+     * All of an employee's slot ranges for today, sorted by start time.
+     */
+    private function allSlotRanges(Employee $employee, Carbon $now): array
+    {
+        $slots = array_filter([$employee->morning_slot, $employee->evening_slot]);
+        $ranges = [];
+        foreach ($slots as $slot) {
+            $range = $this->parseSlotRange($slot, $now);
+            if ($range) {
+                $ranges[] = $range;
+            }
+        }
+        usort($ranges, fn ($a, $b) => $a[0]->timestamp <=> $b[0]->timestamp);
+        return $ranges;
+    }
+
+    /**
+     * Sum worked minutes across the day, one session per slot. For each slot,
+     * takes the first "in" and the last "out" within that slot's window (or
+     * the slot's end if never scanned out) — this collapses any number of
+     * duplicate/retry punches inside one slot into a single session, so a
+     * slot can never be credited more than once no matter how noisy the raw
+     * punches are (e.g. two "in" scans 60+ minutes apart from the same
+     * arrival, which a simple sequential walk would treat as two sessions).
+     * Also caps credit symmetrically at the slot's official start/end — no
+     * early-arrival or overtime credit.
+     */
+    private function computeWorkedHoursAcrossSlots(int $employeeId, string $date, array $slotRanges): float
+    {
+        $dayPunches = EmployeePunchLog::where('employee_id', $employeeId)
+            ->where('punch_date', $date)
+            ->orderBy('punch_time')
+            ->get();
+
+        $totalMinutes = 0;
+
+        foreach ($slotRanges as [$start, $end]) {
+            $windowStart = $start->copy()->subMinutes(30);
+            $slotPunches = $dayPunches->filter(function ($p) use ($date, $windowStart, $end) {
+                $t = Carbon::parse("$date {$p->punch_time}", 'Asia/Kolkata');
+                return $t->between($windowStart, $end);
+            });
+            if ($slotPunches->isEmpty()) {
+                continue;
+            }
+
+            $firstIn = $slotPunches->firstWhere('punch_type', 'in');
+            if (!$firstIn) {
+                continue;
+            }
+            // An early check-in (within the 30-min grace before slot start) is
+            // valid attendance, but doesn't earn extra paid minutes — credit
+            // from the slot's official start, never earlier.
+            $inTime = Carbon::parse("$date {$firstIn->punch_time}", 'Asia/Kolkata');
+            $creditedStart = $inTime->lt($start) ? $start : $inTime;
+
+            $lastOut = $slotPunches->where('punch_type', 'out')->sortByDesc('punch_time')->first();
+            $endTime = $lastOut ? Carbon::parse("$date {$lastOut->punch_time}", 'Asia/Kolkata') : $end;
+            // Symmetric with the early-arrival cap above — staying late past the
+            // slot's official end doesn't earn overtime, so cap credit there too.
+            if ($endTime->gt($end)) {
+                $endTime = $end;
+            }
+            if ($endTime->lt($creditedStart)) {
+                $endTime = $end;
+            }
+
+            $totalMinutes += max(0, $creditedStart->diffInMinutes($endTime));
+        }
+
+        return round($totalMinutes / 60, 2);
     }
 
     /**

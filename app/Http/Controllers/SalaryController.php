@@ -5,10 +5,63 @@ namespace App\Http\Controllers;
 use App\Models\Salary;
 use Illuminate\Http\Request;
 use App\Models\Employee;
+use App\Models\EmployeeLeave;
 use Illuminate\Support\Facades\Validator;
 
 class SalaryController extends Controller
 {
+    // Admin-entered paid leave days for an employee/month on the Salary
+    // Generation page — excused from the absent-day count without needing an
+    // actual attendance record (e.g. approved vacation/sick leave).
+    public function getLeaveDays(Request $request)
+    {
+        $employeeId = $request->input('employee_id');
+        $year       = (int) $request->input('year');
+        $month      = (int) $request->input('month');
+
+        $leaveDays = EmployeeLeave::where('employee_id', $employeeId)
+            ->where('year', $year)
+            ->where('month', $month)
+            ->value('leave_days') ?? 0;
+
+        return response()->json([
+            'leave_days' => $leaveDays,
+            'code'       => 200,
+        ], 200);
+    }
+
+    public function setLeaveDays(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'employee_id' => 'required',
+            'year'        => 'required|integer',
+            'month'       => 'required|integer|min:1|max:12',
+            'leave_days'  => 'required|integer|min:0|max:31',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'message' => $validator->errors(),
+                'code'    => 422,
+            ], 200);
+        }
+
+        $leave = EmployeeLeave::updateOrCreate(
+            [
+                'employee_id' => $request->employee_id,
+                'year'        => $request->year,
+                'month'       => $request->month,
+            ],
+            ['leave_days' => $request->leave_days]
+        );
+
+        return response()->json([
+            'message'    => 'Leave days saved.',
+            'leave_days' => $leave->leave_days,
+            'code'       => 200,
+        ], 200);
+    }
+
     public function generateSalary(Request $request)
     {
         $validator = Validator::make($request->all(), [

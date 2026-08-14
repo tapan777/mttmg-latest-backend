@@ -300,6 +300,7 @@ class MemberController extends Controller
             $search_text = $request->search_text;
             $package_id  = $request->package_id;
             $member_id   = $request->id;
+            $exactId     = $request->input('exact_id');
             $limit       = $request->limit > 0 ? $request->limit : 15;
             $index       = $request->index > 0 ? $request->index : 0;
             $hasStatus   = $request->has('status') && $request->status !== null && $request->status !== '';
@@ -320,7 +321,44 @@ class MemberController extends Controller
                     ->pluck('member_id');
             }
 
-            if ($search_text) {
+            if ($exactId) {
+                // Clicking a specific autocomplete suggestion should land on exactly
+                // that member — never fall back to a name/phone text search, which
+                // can match multiple same-named members and show the wrong one(s).
+                $query = Member::query()->where('id', $exactId);
+
+                $total_count = $query->count();
+                $search_data = $query->with('steamBaths')->get();
+
+                if ($search_data->isNotEmpty()) {
+                    foreach ($search_data as $member) {
+                        $member->bath_available = "No";
+                        $member->used_bath = 0;
+                        $member->remaining_bath = 0;
+                        $member->total_bath = 0;
+
+                        if ($member->steamBaths->isNotEmpty()) {
+                            foreach ($member->steamBaths as $steamBath) {
+                                $available_steamBath = $steamBath->total_bath - $steamBath->used_bath;
+                                $member->bath_available = $available_steamBath > 0 ? "Yes" : "No";
+                                $member->used_bath = $steamBath->used_bath;
+                                $member->remaining_bath = $available_steamBath;
+                                $member->total_bath = $steamBath->total_bath;
+                            }
+                        }
+                    }
+                    return response()->json([
+                        'data'        => $search_data,
+                        'total_count' => $total_count,
+                        'code'        => 200
+                    ], 200);
+                }
+                return response()->json([
+                    'message'     => "No data Found",
+                    'total_count' => 0,
+                    'code'        => 500
+                ], 200);
+            } elseif ($search_text) {
                 $query = Member::query()
                     ->where(function ($q) use ($search_text) {
                         $q->where('membership_number', 'like', "%$search_text%")

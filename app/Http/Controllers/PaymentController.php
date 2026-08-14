@@ -420,6 +420,28 @@ class PaymentController extends Controller
                     $previous_endDate->save();
                     Member::where('id', $request->member_id)->update(['status' => 1]);
 
+                    // A member who expired before this renewal may already have been
+                    // removed from the biometric device (see SyncDeviceMembership).
+                    // Re-add them now that they have an active package again, using
+                    // their existing card — there's no reason to issue a new card
+                    // just because the device forgot them.
+                    $renewedMember = Member::find($request->member_id);
+                    if ($renewedMember && Carbon::parse($end_date)->gte(Carbon::today())) {
+                        $sn       = config('zkteco.sn', 'HKQ8241900193');
+                        $uid      = $renewedMember->id;
+                        $safeName = str_replace(' ', '_', $renewedMember->name);
+                        $card     = $renewedMember->card_number ?? '0';
+                        $cmdId    = time();
+
+                        AdmsController::queueCommand(
+                            $sn,
+                            $cmdId,
+                            "C:{$cmdId}:DATA UPDATE USERINFO\tPIN={$uid}\tName={$safeName}\tCard={$card}\tPri=0"
+                        );
+
+                        $renewedMember->update(['on_device' => 1]);
+                    }
+
                     $sms = SmsStatus::first(); // Assuming only one row tracks the balance
 
                     if ($sms && $sms->amount > 0) {

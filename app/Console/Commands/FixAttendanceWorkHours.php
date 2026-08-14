@@ -100,14 +100,16 @@ class FixAttendanceWorkHours extends Command
     }
 
     /**
-     * Walk the day's punches in order and sum each session's real duration.
-     * A session with a matching "out" punch uses the actual diff. A session
-     * left open (no "out" — e.g. AutoCheckoutEmployees never got a chance to
-     * close it in the historical data, or the employee simply forgot to
-     * swipe out) is only credited up to the end of whichever slot its "in"
-     * time falls into — never a flat full-slot credit just because *some*
-     * check-in exists somewhere in a broad window. Returns null when there's
-     * no session to credit at all.
+     * Sum worked minutes across the day, one session per slot. For each slot,
+     * takes the first "in" and the last "out" within that slot's window (or
+     * the slot's end if never scanned out) — this collapses any number of
+     * duplicate/retry punches inside one slot into a single session, so a
+     * slot can never be credited more than once no matter how noisy the raw
+     * punches are (e.g. two "in" scans an hour apart from the same arrival,
+     * which a sequential open/close walk would wrongly treat as two separate
+     * sessions and credit twice). Also caps credit symmetrically at the
+     * slot's official start/end — no early-arrival or overtime credit.
+     * Returns null when there's no session to credit at all.
      */
     private function computeWorkedHours(Employee $employee, $dayPunches, string $date): ?float
     {
@@ -118,60 +120,40 @@ class FixAttendanceWorkHours extends Command
         )));
 
         $totalMinutes = 0;
-        $openIn = null;
 
-        $closeOpenSession = function (?Carbon $atTime = null) use (&$openIn, &$totalMinutes, $slotRanges) {
-            if ($openIn === null) {
-                return;
+        foreach ($slotRanges as [$start, $end]) {
+            $windowStart = $start->copy()->subMinutes(30);
+            $slotPunches = $dayPunches->filter(function ($p) use ($date, $windowStart, $end) {
+                $t = Carbon::parse("$date {$p->punch_time}");
+                return $t->between($windowStart, $end);
+            });
+            if ($slotPunches->isEmpty()) {
+                continue;
+            }
+
+            $firstIn = $slotPunches->firstWhere('punch_type', 'in');
+            if (!$firstIn) {
+                continue;
             }
             // An early check-in (within the 30-min grace before slot start) is
             // valid attendance for the slot, but doesn't earn extra paid minutes
             // — credit from the slot's official start, never earlier.
-            $creditedStart = $openIn;
-            foreach ($slotRanges as [$start, $end]) {
-                if ($openIn->between($start->copy()->subMinutes(30), $end) && $openIn->lt($start)) {
-                    $creditedStart = $start;
-                    break;
-                }
-            }
-            if ($atTime !== null) {
-                $totalMinutes += max(0, $creditedStart->diffInMinutes($atTime));
-            } else {
-                // No closing "out" punch — only credit up to the end of the
-                // slot this check-in belongs to (mirrors what the slot-end
-                // auto-checkout would have done), never a blanket full day.
-                foreach ($slotRanges as [$start, $end]) {
-                    $windowStart = $start->copy()->subMinutes(30);
-                    if ($openIn->between($windowStart, $end)) {
-                        $totalMinutes += max(0, $creditedStart->diffInMinutes($end));
-                        break;
-                    }
-                }
-            }
-            $openIn = null;
-        };
+            $inTime = Carbon::parse("$date {$firstIn->punch_time}");
+            $creditedStart = $inTime->lt($start) ? $start : $inTime;
 
-        foreach ($dayPunches as $p) {
-            $time = Carbon::parse("$date {$p->punch_time}");
-            if ($p->punch_type === 'in') {
-                // A duplicate/double-scan "in" arriving seconds or a couple of
-                // minutes after the currently-open one is a device glitch, not
-                // a new session — closing-and-reopening for it would credit a
-                // whole extra slot for a tap that lasted a few seconds. Ignore it.
-                if ($openIn !== null && $openIn->diffInMinutes($time) < 5) {
-                    continue;
-                }
-                // A genuine second "in" without a prior "out" — close the
-                // previous open session using the slot-end estimate before
-                // starting the new one, instead of silently discarding it.
-                $closeOpenSession();
-                $openIn = $time;
-            } elseif ($p->punch_type === 'out' && $openIn) {
-                $closeOpenSession($time);
+            $lastOut = $slotPunches->where('punch_type', 'out')->sortByDesc('punch_time')->first();
+            $endTime = $lastOut ? Carbon::parse("$date {$lastOut->punch_time}") : $end;
+            // Symmetric with the early-arrival cap above — staying late past the
+            // slot's official end doesn't earn overtime, so cap credit there too.
+            if ($endTime->gt($end)) {
+                $endTime = $end;
             }
+            if ($endTime->lt($creditedStart)) {
+                $endTime = $end;
+            }
+
+            $totalMinutes += max(0, $creditedStart->diffInMinutes($endTime));
         }
-        // Any session still open at the end of the day's punches.
-        $closeOpenSession();
 
         return $totalMinutes > 0 ? round($totalMinutes / 60, 2) : null;
     }

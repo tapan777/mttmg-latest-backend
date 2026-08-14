@@ -43,23 +43,14 @@ class AdmsController extends Controller
         $key      = "zkteco_commands_{$sn}";
         $commands = Cache::get($key, []);  // read only, don't delete yet
 
-        // One-shot "resync" request (see requestFullResync): reporting a stamp
-        // of 0 tells the device the server hasn't seen ANY of its attendance
-        // log yet, so it re-pushes its full history on this check-in — the
-        // only way to backfill missed punches, since the VPS can't open a
-        // direct connection to the device's private LAN IP itself.
-        $resyncKey   = "zkteco_force_resync_{$sn}";
-        $forceResync = Cache::pull($resyncKey, false); // read-and-clear, one-shot
-
         Log::info('ZKTeco heartbeat', [
             'sn'               => $sn,
             'pending_commands' => count($commands),
             'commands'         => array_values($commands),
-            'force_resync'     => $forceResync,
         ]);
 
         $body  = "GET OPTION FROM: {$sn}\r\n";
-        $body .= 'ATTLOGStamp=' . ($forceResync ? '0' : '9999') . "\r\n";
+        $body .= "ATTLOGStamp=9999\r\n";
         $body .= "OPERLOGStamp=9999\r\n";
         $body .= "ATTPHOTOStamp=9999\r\n";
         $body .= "ErrorDelay=30\r\n";
@@ -201,34 +192,44 @@ class AdmsController extends Controller
                             ->where('punch_date', $date)
                             ->orderBy('punch_time')
                             ->get();
+
+                        // One session per slot: first "in" to last "out" within that
+                        // slot's window (or slot end if not yet scanned out). Collapses
+                        // any duplicate/retry punches inside a slot into one session, so
+                        // a slot is never credited more than once — mirrors
+                        // AutoCheckoutEmployees::computeWorkedHoursAcrossSlots so the
+                        // total stays consistent whether it's updated live here or by
+                        // that cron/backfill command.
                         $totalMinutes = 0;
-                        $openIn = null;
-                        foreach ($dayPunches as $p) {
-                            if ($p->punch_type === 'in') {
-                                $punchTime = Carbon::parse($p->punch_time);
-                                // A duplicate/double-scan "in" arriving seconds or a
-                                // couple of minutes after the currently-open one is a
-                                // device glitch, not a new session — ignore it rather
-                                // than shifting the credited start time.
-                                if ($openIn !== null && $openIn->diffInMinutes($punchTime) < 5) {
-                                    continue;
-                                }
-                                $openIn = $punchTime;
-                            } elseif ($p->punch_type === 'out' && $openIn) {
-                                // An early check-in (within the 30-min grace before slot
-                                // start) is valid attendance for the slot, but doesn't earn
-                                // extra paid minutes — credit from the slot's official
-                                // start, never earlier.
-                                $creditedStart = $openIn;
-                                foreach ($slotRanges as [$slotStart, $slotEnd]) {
-                                    if ($openIn->between($slotStart->copy()->subMinutes(30), $slotEnd) && $openIn->lt($slotStart)) {
-                                        $creditedStart = $slotStart;
-                                        break;
-                                    }
-                                }
-                                $totalMinutes += $creditedStart->diffInMinutes(Carbon::parse($p->punch_time));
-                                $openIn = null;
+                        foreach ($slotRanges as [$slotStart, $slotEnd]) {
+                            $windowStart = $slotStart->copy()->subMinutes(30);
+                            $slotPunches = $dayPunches->filter(function ($p) use ($windowStart, $slotEnd) {
+                                $t = Carbon::parse($p->punch_time);
+                                return $t->between($windowStart, $slotEnd);
+                            });
+                            if ($slotPunches->isEmpty()) {
+                                continue;
                             }
+
+                            $firstIn = $slotPunches->firstWhere('punch_type', 'in');
+                            if (!$firstIn) {
+                                continue;
+                            }
+                            $inTime = Carbon::parse($firstIn->punch_time);
+                            $creditedStart = $inTime->lt($slotStart) ? $slotStart : $inTime;
+
+                            $lastOut = $slotPunches->where('punch_type', 'out')->sortByDesc('punch_time')->first();
+                            $endTime = $lastOut ? Carbon::parse($lastOut->punch_time) : $slotEnd;
+                            // Symmetric with the early-arrival cap above — staying late
+                            // past the slot's official end doesn't earn overtime.
+                            if ($endTime->gt($slotEnd)) {
+                                $endTime = $slotEnd;
+                            }
+                            if ($endTime->lt($creditedStart)) {
+                                $endTime = $slotEnd;
+                            }
+
+                            $totalMinutes += max(0, $creditedStart->diffInMinutes($endTime));
                         }
                         $lastAttendance->work_hours = round($totalMinutes / 60, 2);
                         $lastAttendance->save();
@@ -287,24 +288,6 @@ class AdmsController extends Controller
             'last_seen' => $lastSeen ?? 'Never',
             'message'   => $online ? 'Device is online' : 'Device offline or not connected',
         ]);
-    }
-
-    /**
-     * "Refresh" — the VPS can't open a direct connection to the device (it
-     * sits on a private LAN IP), so the only way to backfill any punches the
-     * live push missed is to ask the device itself to re-send its full
-     * attendance history on its next check-in. Sets a one-shot flag that
-     * handleRegistration() picks up and clears automatically.
-     */
-    public function requestFullResync(Request $request)
-    {
-        $sn = $request->query('sn', config('zkteco.sn', 'HKQ8241900193'));
-        Cache::put("zkteco_force_resync_{$sn}", true, now()->addHours(1));
-
-        return response()->json([
-            'message' => 'Resync requested — the device will re-send its full attendance history on its next check-in (within ~' . self::HEARTBEAT_INTERVAL . ' seconds). Any punches missed by the live sync, for both members and employees, will be backfilled automatically once that happens.',
-            'code'    => 200,
-        ], 200);
     }
 
     public function addUser(Request $request)

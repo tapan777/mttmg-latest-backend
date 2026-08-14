@@ -204,6 +204,122 @@ class DashboardController extends Controller
         ], 200);
     }
 
+    // Underlying payment records behind a Quick Stats card on the dashboard —
+    // 'source' picks which payment table(s) to pull from and 'scope' picks the
+    // same today/period date window dashboard_counts() used to compute the sum,
+    // so the total shown here always matches the figure the card was clicked from.
+    public function paymentBreakdown(Request $request)
+    {
+        $source      = $request->input('source', 'main'); // main | trainer | nr | yearly | steam | total
+        $scope       = $request->input('scope', 'today'); // today | period
+        $filterType  = $request->input('filter_type', 'monthly');
+        $filterYear  = (int) $request->input('year', now()->year);
+        $filterMonth = (int) $request->input('month', now()->month);
+        $limit       = (int) $request->input('limit', 100);
+        $index       = (int) $request->input('index', 0);
+        $today       = Carbon::today();
+
+        $applyDateWindow = function ($query, string $column = 'created_at') use ($scope, $filterType, $filterYear, $filterMonth, $today) {
+            if ($scope === 'today') {
+                return $query->whereDate($column, $today);
+            }
+            if ($filterType === 'yearly') {
+                return $query->whereYear($column, $filterYear);
+            }
+            return $query->whereYear($column, $filterYear)->whereMonth($column, $filterMonth);
+        };
+
+        $rows = collect();
+
+        if (in_array($source, ['main', 'total'])) {
+            $rows = $rows->merge(
+                $applyDateWindow(Payment::with('members:id,name'))
+                    ->get()
+                    ->map(fn ($p) => [
+                        'name'   => $p->members->name ?? 'N/A',
+                        'amount' => (float) $p->paying_amount,
+                        'date'   => date('d-m-Y', strtotime($p->created_at)),
+                        'mode'   => $p->mode_of_payment,
+                        'type'   => 'Main Package',
+                    ])
+            );
+        }
+
+        if (in_array($source, ['trainer', 'total'])) {
+            $rows = $rows->merge(
+                $applyDateWindow(TrainerPayment::with('members:id,name'))
+                    ->get()
+                    ->map(fn ($p) => [
+                        'name'   => $p->members->name ?? 'N/A',
+                        'amount' => (float) $p->paying_amount,
+                        'date'   => date('d-m-Y', strtotime($p->created_at)),
+                        'mode'   => $p->mode_of_payment,
+                        'type'   => 'PT Package',
+                    ])
+            );
+        }
+
+        if ($source === 'total') {
+            $rows = $rows->merge(
+                $applyDateWindow(NonRegistreMember::query())
+                    ->get()
+                    ->map(fn ($p) => [
+                        'name'   => $p->name ?? 'N/A',
+                        'amount' => (float) $p->paying_amount,
+                        'date'   => date('d-m-Y', strtotime($p->created_at)),
+                        'mode'   => $p->mode_of_payment,
+                        'type'   => 'Non-Member',
+                    ])
+            );
+
+            $rows = $rows->merge(
+                $applyDateWindow(YearlyPackage::where('included_in_main_payment', false)->with('members:id,name'))
+                    ->get()
+                    ->map(fn ($p) => [
+                        'name'   => $p->members->name ?? 'N/A',
+                        'amount' => (float) $p->package_amount,
+                        'date'   => date('d-m-Y', strtotime($p->created_at)),
+                        'mode'   => $p->payment_mode ?? '—',
+                        'type'   => 'Yearly Membership',
+                    ])
+            );
+
+            $steamQuery = DB::table('invoices')
+                ->whereNotNull('steam_bath_id')
+                ->select('steam_bath_amount', 'steam_bath_payment_date', 'created_at', 'member_id');
+            if ($scope === 'today') {
+                $steamQuery->whereRaw('DATE(COALESCE(steam_bath_payment_date, created_at)) = ?', [$today->toDateString()]);
+            } elseif ($filterType === 'yearly') {
+                $steamQuery->whereRaw('YEAR(COALESCE(steam_bath_payment_date, created_at)) = ?', [$filterYear]);
+            } else {
+                $steamQuery->whereRaw('YEAR(COALESCE(steam_bath_payment_date, created_at)) = ?', [$filterYear])
+                    ->whereRaw('MONTH(COALESCE(steam_bath_payment_date, created_at)) = ?', [$filterMonth]);
+            }
+            $memberNames = Member::whereIn('id', $steamQuery->pluck('member_id'))->pluck('name', 'id');
+            $rows = $rows->merge(
+                $steamQuery->get()->map(fn ($p) => [
+                    'name'   => $memberNames[$p->member_id] ?? 'N/A',
+                    'amount' => (float) $p->steam_bath_amount,
+                    'date'   => date('d-m-Y', strtotime($p->steam_bath_payment_date ?? $p->created_at)),
+                    'mode'   => '—',
+                    'type'   => 'Steam Bath',
+                ])
+            );
+        }
+
+        $rows = $rows->sortByDesc('date')->values();
+        $total = $rows->sum('amount');
+        $count = $rows->count();
+        $paged = $rows->slice($index, $limit)->values();
+
+        return response()->json([
+            'data'        => $paged,
+            'total_count' => $count,
+            'total_amount' => $total,
+            'code'        => 200,
+        ], 200);
+    }
+
     public function invoiceByCategory()
     {
         try {
