@@ -28,21 +28,35 @@ class AttendanceController extends Controller
     
             $query = Attendance::query();
     
-            // Apply Relationship Conditions Based on `user_id`
+            // Apply Relationship Conditions Based on `user_id`.
+            //
+            // Rows created after the `user_type` column was added carry an explicit
+            // 'employee'/'member' discriminator and are filtered on it directly —
+            // no ambiguity possible. Older rows (user_type IS NULL) fall back to the
+            // previous existence-check logic so historical data is not reinterpreted
+            // or altered.
             if ($type === 'employees') {
                 $query->where(function ($query) {
-                    $query->whereNotNull('user_id')->where(function($query){
-                        $query->where(function($q){
-                            $q->whereHas('employee');
-                        });
+                    $query->whereNotNull('user_id')->where(function ($query) {
+                        $query->where('user_type', 'employee')
+                            ->orWhere(function ($q) {
+                                $q->whereNull('user_type')->whereHas('employee');
+                            });
                     });
                 })->with('employee');
-            } else  {
+            } elseif ($type === 'nonregister') {
+                // Non-register (walk-in) members have no historical rows to fall back
+                // on — their punches were previously invisible (user_id is 100000+id,
+                // which never matched a real Employee/Member), so only the new
+                // explicit user_type tag applies here, no legacy whereHas needed.
+                $query->where('user_type', 'nonregister');
+            } else {
                 $query->where(function ($query) {
-                    $query->whereNotNull('user_id')->where(function($query){
-                        $query->where(function($q){
-                            $q->whereHas('members');
-                        });
+                    $query->whereNotNull('user_id')->where(function ($query) {
+                        $query->where('user_type', 'member')
+                            ->orWhere(function ($q) {
+                                $q->whereNull('user_type')->whereHas('members');
+                            });
                     });
                 })->with('members');
             }
@@ -56,6 +70,12 @@ class AttendanceController extends Controller
                     $query->whereHas('members', function ($qry) use ($searchText) {
                         $qry->where('name', 'LIKE', "%{$searchText}%");
                     });
+                } elseif ($type === 'nonregister') {
+                    $offset = \App\Http\Controllers\NonRegistreMemberController::DEVICE_PIN_OFFSET;
+                    $matchingIds = \App\Models\NonRegistreMember::where('name', 'LIKE', "%{$searchText}%")
+                        ->pluck('id')
+                        ->map(fn ($id) => $offset + $id);
+                    $query->whereIn('user_id', $matchingIds);
                 }
             }
     
@@ -137,6 +157,15 @@ class AttendanceController extends Controller
                         $item->user_name = $item->members->name;
                         $item->phone = $item->members->phone;
                         $item->user_type = 'member';
+                    } elseif ($item->user_type === 'nonregister') {
+                        $offset = \App\Http\Controllers\NonRegistreMemberController::DEVICE_PIN_OFFSET;
+                        $nonRegister = \App\Models\NonRegistreMember::find(((int) $item->user_id) - $offset);
+                        // The member row is deleted once their pass expires (see
+                        // CleanupExpiredNonRegistreMembers), so old punches can
+                        // outlive the record — fall back to a clear placeholder
+                        // instead of a blank name.
+                        $item->user_name = $nonRegister->name ?? 'Expired / Removed';
+                        $item->phone = $nonRegister->phone ?? null;
                     }
 
                     $item->date = date('d-m-Y', strtotime($item->date));

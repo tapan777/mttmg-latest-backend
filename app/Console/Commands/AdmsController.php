@@ -126,6 +126,12 @@ class AdmsController extends Controller
 
     private function processAttendanceLogs(string $body)
     {
+        // See app/Http/Controllers/AdmsController.php for the rationale: a
+        // forced full resync can replay thousands of historical lines in one
+        // push, which would otherwise hit the default execution time limit
+        // partway through and leave the backfill silently incomplete.
+        set_time_limit(0);
+
         foreach (explode("\n", trim($body)) as $line) {
             $line = trim($line);
             if (empty($line)) continue;
@@ -153,30 +159,96 @@ class AdmsController extends Controller
 
                 if ($status === 0) {
                     if (!$lastAttendance) {
+                        // See app/Http/Controllers/AdmsController.php for the rationale:
+                        // device PIN is the raw id for both Employee and Member with no
+                        // offset, so ids can collide. Keep existing priority (Employee
+                        // first) but log loudly on collision instead of guessing silently.
+                        $isNonRegisterMatch = ((int) $userId) >= \App\Http\Controllers\NonRegistreMemberController::DEVICE_PIN_OFFSET
+                            && \App\Models\NonRegistreMember::where('id', ((int) $userId) - \App\Http\Controllers\NonRegistreMemberController::DEVICE_PIN_OFFSET)->exists();
+
+                        $isEmployeeMatch = !$isNonRegisterMatch && Employee::where('id', $userId)->exists();
+                        $isMemberMatch   = !$isNonRegisterMatch && \App\Models\Member::where('id', $userId)->exists();
+
+                        if ($isEmployeeMatch && $isMemberMatch) {
+                            Log::warning('ZKTeco attendance: ambiguous user_id matches both an Employee and a Member', [
+                                'user_id' => $userId,
+                                'date'    => $date,
+                            ]);
+                        }
+
+                        $userType = $isNonRegisterMatch ? 'nonregister' : ($isEmployeeMatch ? 'employee' : ($isMemberMatch ? 'member' : null));
+
                         Attendance::create([
-                            'user_id'  => $userId,
+                            'user_id'   => $userId,
+                            'user_type' => $userType,
                             'date'     => $date,
                             'check_in' => $time,
                             'status'   => 'Present',
                         ]);
+                    } elseif ($time < $lastAttendance->check_in) {
+                        // A resync can replay a genuinely earlier punch than whatever
+                        // created today's row first (e.g. the device was down all
+                        // morning, so the first LIVE punch after it came back created
+                        // this row — then resync backfills the real, earlier morning
+                        // check-in). The day's check-in should always be the earliest
+                        // punch, not whichever happened to arrive at the server first.
+                        $lastAttendance->check_in = $time;
+                        $lastAttendance->save();
                     }
-                } elseif ($status === 1 && $lastAttendance) {
-                    $lastAttendance->check_out = $time;
-                    $lastAttendance->save();
+                } elseif ($status === 1) {
+                    if (!$lastAttendance) {
+                        // A resynced check-out with no matching check-in row at all
+                        // (e.g. the check-in punch itself was missed/never captured)
+                        // — still record what we have rather than silently dropping it.
+                        $isNonRegisterMatch = ((int) $userId) >= \App\Http\Controllers\NonRegistreMemberController::DEVICE_PIN_OFFSET
+                            && \App\Models\NonRegistreMember::where('id', ((int) $userId) - \App\Http\Controllers\NonRegistreMemberController::DEVICE_PIN_OFFSET)->exists();
+
+                        $isEmployeeMatch = !$isNonRegisterMatch && Employee::where('id', $userId)->exists();
+                        $isMemberMatch   = !$isNonRegisterMatch && \App\Models\Member::where('id', $userId)->exists();
+                        $userType = $isNonRegisterMatch ? 'nonregister' : ($isEmployeeMatch ? 'employee' : ($isMemberMatch ? 'member' : null));
+
+                        $lastAttendance = Attendance::create([
+                            'user_id'   => $userId,
+                            'user_type' => $userType,
+                            'date'      => $date,
+                            'check_out' => $time,
+                            'status'    => 'Present',
+                        ]);
+                    } elseif (!$lastAttendance->check_out || $time > $lastAttendance->check_out) {
+                        // Only advance check_out — a resync replaying an earlier
+                        // historical check-out must not overwrite a later, already
+                        // correct one (e.g. the evening slot's checkout arrived live
+                        // before the morning slot's checkout gets backfilled).
+                        $lastAttendance->check_out = $time;
+                        $lastAttendance->save();
+                    }
                 }
 
                 Log::info('ZKTeco attendance saved', ['user' => $userId, 'time' => $attTime, 'status' => $status]);
 
                 // Punch log — every swipe for employees only
                 if (Employee::where('id', $userId)->exists()) {
-                    EmployeePunchLog::create([
-                        'employee_id' => $userId,
-                        'punch_date'  => $date,
-                        'punch_time'  => $time,
-                        'punch_type'  => $status === 1 ? 'out' : 'in',
-                        'source'      => 'device',
-                        'device_sn'   => null,
-                    ]);
+                    $punchType = $status === 1 ? 'out' : 'in';
+
+                    // A full resync replays punches the device already sent before —
+                    // without this check, every already-synced punch gets re-inserted
+                    // as a duplicate row on each resync, bloating the table forever.
+                    $alreadyLogged = EmployeePunchLog::where('employee_id', $userId)
+                        ->where('punch_date', $date)
+                        ->where('punch_time', $time)
+                        ->where('punch_type', $punchType)
+                        ->exists();
+
+                    if (!$alreadyLogged) {
+                        EmployeePunchLog::create([
+                            'employee_id' => $userId,
+                            'punch_date'  => $date,
+                            'punch_time'  => $time,
+                            'punch_type'  => $punchType,
+                            'source'      => 'device',
+                            'device_sn'   => null,
+                        ]);
+                    }
 
                     // Recompute total worked hours for the day as the sum of each
                     // in/out session's duration (morning + evening), not the raw

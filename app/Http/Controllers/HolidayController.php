@@ -19,7 +19,7 @@ class HolidayController extends Controller
         }
 
         $holidays = $query->get(['id', 'date', 'name'])->map(function ($h) {
-            $h->date = date('Y-m-d', strtotime($h->date));
+            $h->date = date('d-m-Y', strtotime($h->date));
             return $h;
         });
 

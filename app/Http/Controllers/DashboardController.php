@@ -101,8 +101,8 @@ class DashboardController extends Controller
         $period_new_pt       = $applyPeriod(TrainerPayment::where('payment_type', 0))->count();
         $period_enquiries    = $applyPeriod(Followup::query())->count();
 
-        $period_main_pay     = $applyPeriod(Payment::query())->sum('paying_amount');
-        $period_trainer_pay  = $applyPeriod(TrainerPayment::query())->sum('paying_amount');
+        $period_main_pay     = $applyPeriod(Payment::query(), 'date_of_payment')->sum('paying_amount');
+        $period_trainer_pay  = $applyPeriod(TrainerPayment::query(), 'date_of_payment')->sum('paying_amount');
         $period_nr_pay       = $applyPeriod(NonRegistreMember::query())->sum('paying_amount');
         $period_yearly_pay   = $applyPeriod(YearlyPackage::where('included_in_main_payment', false))->sum('package_amount');
 
@@ -125,8 +125,8 @@ class DashboardController extends Controller
         $period_attendance = $applyPeriod(Attendance::query(), 'date')->count();
 
         // ── Today totals ──
-        $today_main_pay    = Payment::whereDate('created_at', $today)->sum('paying_amount');
-        $today_trainer_pay = TrainerPayment::whereDate('created_at', $today)->sum('paying_amount');
+        $today_main_pay    = Payment::whereDate('date_of_payment', $today)->sum('paying_amount');
+        $today_trainer_pay = TrainerPayment::whereDate('date_of_payment', $today)->sum('paying_amount');
         $today_nr_pay      = NonRegistreMember::whereDate('created_at', $today)->sum('paying_amount');
         $today_yearly_pay  = YearlyPackage::where('included_in_main_payment', false)->whereDate('created_at', $today)->sum('package_amount');
         $today_steam_pay   = (float) DB::table('invoices')
@@ -232,27 +232,43 @@ class DashboardController extends Controller
         $rows = collect();
 
         if (in_array($source, ['main', 'total'])) {
+            $mainPayments = $applyDateWindow(Payment::with('members:id,name'), 'date_of_payment')->get();
+
             $rows = $rows->merge(
-                $applyDateWindow(Payment::with('members:id,name'))
-                    ->get()
+                $mainPayments->map(fn ($p) => [
+                    'name'   => $p->members->name ?? 'N/A',
+                    // A yearly membership fee bundled into the same payment is included in
+                    // paying_amount but tracked separately in yearly_membership_included —
+                    // subtract it here so this row reflects only the Main Package portion
+                    // (matches BalanceSheetController/AllPaymentController).
+                    'amount' => (float) $p->paying_amount - (float) ($p->yearly_membership_included ?? 0),
+                    'date'   => date('d-m-Y', strtotime($p->date_of_payment)),
+                    'mode'   => $p->mode_of_payment,
+                    'type'   => 'Main Package',
+                ])
+            );
+
+            $rows = $rows->merge(
+                $mainPayments
+                    ->filter(fn ($p) => (float) ($p->yearly_membership_included ?? 0) > 0)
                     ->map(fn ($p) => [
                         'name'   => $p->members->name ?? 'N/A',
-                        'amount' => (float) $p->paying_amount,
-                        'date'   => date('d-m-Y', strtotime($p->created_at)),
+                        'amount' => (float) $p->yearly_membership_included,
+                        'date'   => date('d-m-Y', strtotime($p->date_of_payment)),
                         'mode'   => $p->mode_of_payment,
-                        'type'   => 'Main Package',
+                        'type'   => 'Yearly Membership',
                     ])
             );
         }
 
         if (in_array($source, ['trainer', 'total'])) {
             $rows = $rows->merge(
-                $applyDateWindow(TrainerPayment::with('members:id,name'))
+                $applyDateWindow(TrainerPayment::with('members:id,name'), 'date_of_payment')
                     ->get()
                     ->map(fn ($p) => [
                         'name'   => $p->members->name ?? 'N/A',
                         'amount' => (float) $p->paying_amount,
-                        'date'   => date('d-m-Y', strtotime($p->created_at)),
+                        'date'   => date('d-m-Y', strtotime($p->date_of_payment)),
                         'mode'   => $p->mode_of_payment,
                         'type'   => 'PT Package',
                     ])

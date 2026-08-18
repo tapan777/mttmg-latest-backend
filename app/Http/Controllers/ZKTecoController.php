@@ -123,8 +123,28 @@ class ZKTecoController extends Controller
                     }
                 } else {
                     if (!$last || $last->check_out !== null) {
+                        // Device PIN is the raw id for both Employee and Member with no
+                        // offset, so ids can collide between the two tables. Keep the
+                        // app's existing priority (Employee first) but log loudly on
+                        // collision so it's visible instead of silently guessed.
+                        $isNonRegisterMatch = ((int) $pin) >= \App\Http\Controllers\NonRegistreMemberController::DEVICE_PIN_OFFSET
+                            && \App\Models\NonRegistreMember::where('id', ((int) $pin) - \App\Http\Controllers\NonRegistreMemberController::DEVICE_PIN_OFFSET)->exists();
+
+                        $isEmployeeMatch = !$isNonRegisterMatch && Employee::where('id', $pin)->exists();
+                        $isMemberMatch   = !$isNonRegisterMatch && \App\Models\Member::where('id', $pin)->exists();
+
+                        if ($isEmployeeMatch && $isMemberMatch) {
+                            Log::warning('ZKTeco attendance: ambiguous user_id matches both an Employee and a Member', [
+                                'user_id' => $pin,
+                                'date'    => $date,
+                            ]);
+                        }
+
+                        $userType = $isNonRegisterMatch ? 'nonregister' : ($isEmployeeMatch ? 'employee' : ($isMemberMatch ? 'member' : null));
+
                         Attendance::create([
                             'user_id'    => $pin,
+                            'user_type'  => $userType,
                             'date'       => $date,
                             'check_in'   => $time,
                             'status'     => 'Present',

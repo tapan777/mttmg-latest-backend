@@ -217,7 +217,19 @@ class AllPaymentController extends Controller
                 ->orderBy('date_desc', 'desc')
                 ->offset($offset)
                 ->limit($limit)
-                ->get();
+                ->get()
+                ->map(function ($p) {
+                    if (!empty($p->date)) {
+                        $p->date = date('d-m-Y', strtotime($p->date));
+                    }
+                    if (!empty($p->start_date)) {
+                        $p->start_date = date('d-m-Y', strtotime($p->start_date));
+                    }
+                    if (!empty($p->end_date)) {
+                        $p->end_date = date('d-m-Y', strtotime($p->end_date));
+                    }
+                    return $p;
+                });
 
             return response()->json([
                 'payments' => $payments,

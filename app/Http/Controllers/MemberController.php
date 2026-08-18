@@ -509,7 +509,17 @@ class MemberController extends Controller
                         $trainer_payment->date_of_payment = !$trainer_payment->date_of_payment ? null : date('d-m-Y', strtotime($trainer_payment->date_of_payment));
                         $trainer_payment->start_date = !$trainer_payment->start_date ? null : date('d-m-Y', strtotime($trainer_payment->start_date));
                         $trainer_payment->end_date = !$trainer_payment->end_date ? null : date('d-m-Y', strtotime($trainer_payment->end_date));
-                        $trainer_payment->days_left = self::daysleft($trainer_payment->end_date);
+                        if ($trainer_payment->end_date) {
+                            $pt_expired_data = self::daysWhenResumed($trainer_payment->end_date);
+                            $trainer_payment->days_left = $pt_expired_data['daysleft'];
+                            $trainer_payment->expired = $pt_expired_data['expired'];
+                            if (isset($pt_expired_data['expired_days'])) {
+                                $trainer_payment->expired_days = $pt_expired_data['expired_days'];
+                            }
+                        } else {
+                            $trainer_payment->days_left = 0;
+                            $trainer_payment->expired = "No";
+                        }
                         foreach ($trainer_payment['invoice'] as $invoice) {
                             $trainer_payment['invoice_number'] = $invoice['id'];
                         }
